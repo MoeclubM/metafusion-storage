@@ -1,0 +1,12 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum* ./
+RUN go mod download || true
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/storage-server ./cmd/server
+
+FROM alpine:3.20
+WORKDIR /app
+COPY --from=builder /app/storage-server /app/storage-server
+EXPOSE 8082
+CMD ["/app/storage-server"]

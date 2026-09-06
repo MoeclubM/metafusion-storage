@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  storage:
+    build: .
+    container_name: metafusion-storage
+    restart: unless-stopped
+    environment:
+      - PORT=8082
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=metafusion
+      - DB_NAME=metafusion_storage
+      - S3_ENDPOINT=http://rustfs:9000
+      - S3_BUCKET=metafusion-assets
+    ports:
+      - "8082:8082"
+    networks:
+      - metafusion-net
+
+networks:
+  metafusion-net:
+    external: true
