@@ -47,9 +47,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("token verifier initialization failed: %v", err)
 	}
-	// 迁移期兜底：账号服务拆分完成前，浏览器可能持有 catalog 签发的不透明会话令牌，
-	// 存储侧不查目录库，改为请目录服务解析身份；auth 上线后把回退关掉即可。
-	verifier.SetFallback(cat)
+	// 存量兜底：浏览器可能还持有登录时的不透明会话令牌（非 JWT）。身份只能问账号服务，
+	// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
+	if cfg.AuthURL != "" {
+		verifier.SetFallback(auth.NewSessionClient(cfg.AuthURL, 5*time.Second))
+	}
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())

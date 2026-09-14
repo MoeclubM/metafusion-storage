@@ -28,10 +28,58 @@ type Principal struct {
 	Role     string `json:"role"`
 }
 
-// SessionResolver 是迁移期的会话兜底：账号服务拆分完成前，浏览器可能持有
-// catalog 签发的不透明会话令牌（不是 JWT）。解析交给 catalog，存储侧不查它的库。
+// SessionResolver 是存量令牌的兜底：用户可能还持有登录时发的不透明会话令牌（不是 JWT）。
+// 解析**必须问账号服务**（会话表在它那里）；本服务不查任何人的库。
 type SessionResolver interface {
 	Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool)
+}
+
+// SessionClient 是与账号服务约定的兜底解析实现：把原样的 Bearer/Cookie 转给
+// `GET /api/auth/me`，由账号服务验签或查会话表后返回身份。
+// 账号服务是唯一身份来源——目录服务不参与身份判定，因此这里不指向 CATALOG_URL。
+type SessionClient struct {
+	base string
+	http *http.Client
+}
+
+func NewSessionClient(baseURL string, timeout time.Duration) *SessionClient {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &SessionClient{base: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: timeout}}
+}
+
+func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool) {
+	if c.base == "" || (bearer == "" && cookie == "") {
+		return nil, false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/auth/me", nil)
+	if err != nil {
+		return nil, false
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if cookie != "" {
+		req.AddCookie(&http.Cookie{Name: "mf_session", Value: cookie})
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var user struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&user); err != nil || user.ID == "" {
+		return nil, false
+	}
+	return &Principal{ID: user.ID, Username: user.Username, Role: user.Role}, true
 }
 
 // Verifier 只做一件事：把请求换算成身份。

@@ -9,7 +9,9 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 - **不拥有**：作品/专辑/曲目等目录数据（不复制、不 JOIN 目录库）、收录位置（页码/时间码属目录侧 `locator`）。
 - **依赖**：元数据目录服务（实体可见性判定）、账号服务（令牌验签，迁移期可用目录服务兜底）。
 
-存储侧与目录侧的接口只有两条：`GET /api/catalog/entities/{id}`（可见性与 kind）与 `GET /api/auth/me`（迁移期身份兜底）。
+存储侧与目录侧的接口只有一条：`GET /api/catalog/entities/{id}`（可见性与 kind）；实体已合并时再取一次
+`/api/catalog/entities/{id}/resolve` 跟随重定向（合并只广播事件，改引用是引用方自己的事）。
+身份解析不走目录服务：存量不透明令牌的兜底问 `AUTH_URL`（账号服务）。
 
 ## HTTP 契约（`/api/storage`）
 
@@ -45,10 +47,11 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 | `STORAGE_S3_ENDPOINT` | 空 | 为空即本地对象模式（无需 RustFS）；兼容旧名 `ARCHIVE_S3_ENDPOINT` |
 | `STORAGE_S3_PUBLIC_ENDPOINT` | 同内部端点 | 客户端直传使用的对外地址。SigV4 覆盖 Host，必须用浏览器可达的地址签发，否则反代后签名校验失败 |
 | `STORAGE_S3_ACCESS_KEY` / `_SECRET_KEY` / `_BUCKET` / `_TLS` | — | 对象存储凭据与桶（旧名 `ARCHIVE_S3_*` 同义） |
-| `STORAGE_JWKS_URL` | `http://catalog:8080/api/oidc/jwks` | 验签公钥来源；账号服务上线后改指向 auth |
+| `STORAGE_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
+| `AUTH_URL` | 空 | 账号服务地址，仅用于存量不透明会话令牌的兜底解析（`GET /api/auth/me`）；留空即"只接受 JWT" |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库保持一致，避免存量令牌失效 |
-| `CATALOG_URL` | `http://catalog:8080` | 目录服务地址（可见性判定） |
+| `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性判定） |
 | `STORAGE_PRESIGN_TTL_MINUTES` | `120` | 预签名有效期 |
 | `STORAGE_MAX_PARTS` | `10000` | 单次上传最大分片数 |
 | `STORAGE_MAX_UPLOAD_MB` | `0` | 服务端接收路径的上限，`0` 为不限制（直传路径不受此限） |

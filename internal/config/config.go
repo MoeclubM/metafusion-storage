@@ -33,6 +33,9 @@ type Config struct {
 	JWTPublicKeyPEM string
 	JWTIssuer       string
 	JWTAudience     string
+	// AuthURL 账号服务地址，仅用于存量不透明会话令牌的兜底解析（GET /api/auth/me）。
+	// 留空即"只接受 JWT"：身份问题只问账号服务，不查任何人的库。
+	AuthURL string
 	// CatalogURL 元数据服务地址：实体可见性必须问它，存储侧不复制目录数据。
 	CatalogURL string
 	// PresignTTL 预签名有效期；MaxPartCount 单次上传的最大分片数。
@@ -54,11 +57,12 @@ func Load() Config {
 		S3SecretKey:      env("STORAGE_S3_SECRET_KEY", env("ARCHIVE_S3_SECRET_KEY", "")),
 		S3Bucket:         env("STORAGE_S3_BUCKET", env("ARCHIVE_S3_BUCKET", "metafusion-master")),
 		S3TLS:            envBool("STORAGE_S3_TLS", env("ARCHIVE_S3_TLS", "true") != "false"),
-		JWKSURL:          env("STORAGE_JWKS_URL", "http://catalog:8080/api/oidc/jwks"),
+		JWKSURL:          env("STORAGE_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
 		JWTPublicKeyPEM:  env("AUTH_JWT_PUBLIC_KEY", ""),
 		JWTIssuer:        env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
 		JWTAudience:      env("AUTH_JWT_AUDIENCE", "metafusion"),
-		CatalogURL:       env("CATALOG_URL", "http://catalog:8080"),
+		AuthURL:          env("AUTH_URL", ""),
+		CatalogURL:       env("CATALOG_URL", "http://backend:8080"),
 		PresignTTL:       time.Duration(envInt("STORAGE_PRESIGN_TTL_MINUTES", 120)) * time.Minute,
 		MaxPartCount:     envInt("STORAGE_MAX_PARTS", 10000),
 		MaxUploadMB:      envInt("STORAGE_MAX_UPLOAD_MB", 0),
