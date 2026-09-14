@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -71,15 +72,19 @@ func Load() Config {
 	return c
 }
 
+// buildDSN 用 url.URL 拼连接串：口令里的 @ : / ? # 等字符必须转义，
+// 直接字符串拼接会在这些字符上拼出非法 DSN（或连错主机）。
 func buildDSN() string {
-	host := env("DB_HOST", "localhost")
-	port := env("DB_PORT", "5432")
-	name := env("DB_NAME", "metafusion_db")
-	user := env("DB_USER", "metafusion")
-	pass := os.Getenv("DB_PASSWORD")
-	ssl := env("DB_SSLMODE", "disable")
-	dsn := "postgres://" + user + ":" + pass + "@" + host + ":" + port + "/" + name + "?sslmode=" + ssl
-	return dsn
+	u := url.URL{
+		Scheme: "postgres",
+		Host:   env("DB_HOST", "localhost") + ":" + env("DB_PORT", "5432"),
+		Path:   env("DB_NAME", "metafusion_db"),
+		User:   url.UserPassword(env("DB_USER", "metafusion"), os.Getenv("DB_PASSWORD")),
+	}
+	q := u.Query()
+	q.Set("sslmode", env("DB_SSLMODE", "disable"))
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func env(k, def string) string {

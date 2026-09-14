@@ -5,6 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	// 空导入只为注册 postgres 驱动：漏掉它时 sql.Open("postgres", …) 会直接报 unknown driver，
+	// 而编译与静态检查都发现不了。driver_test.go 专门守住这条。
+	_ "github.com/lib/pq"
 )
 
 // ErrNotFound 表示目标记录不存在（调用方据此回 404，不区分权限与不存在）。
