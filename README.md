@@ -66,6 +66,19 @@ go test ./... && go vet ./...
 未配置 `STORAGE_S3_ENDPOINT` 时走本地对象模式：`initiate` 返回 `direct_upload_url`，
 客户端 `PUT` 原始字节到该地址即完成入库，服务端边收边算 sha256。
 
+## 测试
+
+```bash
+go test ./...                 # 全部离线可跑：路由契约、内容寻址键、可见性边界、直传链路
+STORAGE_TEST_DSN='postgres://…/metafusion_storage_test' go test ./...   # 追加真实数据库回归
+```
+
+其中 `internal/objects/s3_test.go` 用一个只实现必要动作的**假 S3 端点**端到端覆盖了
+"建分片会话 → 逐片签发预签名地址 → 客户端 PUT → 合并 → 回读校验"这条链路
+（单体原本只做服务端中转上传，这段代码在拆分时才出现，也是最容易只在真实环境暴露问题的地方）。
+它已经抓到过一个真实缺陷：分片合并后若采信客户端库返回的 Size（S3 合并响应体里没有长度，该值为 0），
+"声明大小 vs 实际大小"的校验会把每一次分片上传都判成 `size_mismatch`——现在改为 HEAD 回读真实大小。
+
 ## 迁移状态
 
 - 主仓库的 `/api/archive/*`、`/api/playback/*`、`/api/media/*` 仍在服务线上流量；
