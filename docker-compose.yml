@@ -1,5 +1,7 @@
 version: '3.8'
 
+# 存储服务独立编排：只依赖 PostgreSQL（自有 storage schema）与对象存储。
+# 目标形态是各系统独立数据库或受限账号；这里默认共用实例、独立 schema。
 services:
   storage:
     build: .
@@ -9,10 +11,23 @@ services:
       - PORT=8082
       - DB_HOST=postgres
       - DB_PORT=5432
-      - DB_USER=metafusion
-      - DB_NAME=metafusion_storage
-      - S3_ENDPOINT=http://rustfs:9000
-      - S3_BUCKET=metafusion-assets
+      - DB_USER=${DB_USER:-metafusion}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      - DB_NAME=${STORAGE_DB_NAME:-metafusion_db}
+      - STORAGE_ROOT=/app/storage-data
+      - STORAGE_S3_ENDPOINT=${STORAGE_S3_ENDPOINT:-}
+      - STORAGE_S3_PUBLIC_ENDPOINT=${STORAGE_S3_PUBLIC_ENDPOINT:-}
+      - STORAGE_S3_ACCESS_KEY=${MINIO_ROOT_USER:-}
+      - STORAGE_S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-}
+      - STORAGE_S3_BUCKET=${STORAGE_S3_BUCKET:-metafusion-master}
+      - STORAGE_S3_TLS=${STORAGE_S3_TLS:-false}
+      # 账号服务上线前指向目录服务的 JWKS，上线后只改这一个变量。
+      - STORAGE_JWKS_URL=${STORAGE_JWKS_URL:-http://catalog:8080/api/oidc/jwks}
+      - CATALOG_URL=${CATALOG_URL:-http://catalog:8080}
+      - AUTH_JWT_ISSUER=${AUTH_JWT_ISSUER:-https://findverse.cc/api}
+      - AUTH_JWT_AUDIENCE=${AUTH_JWT_AUDIENCE:-metafusion}
+    volumes:
+      - storage_data:/app/storage-data
     ports:
       - "8082:8082"
     networks:
@@ -21,3 +36,6 @@ services:
 networks:
   metafusion-net:
     external: true
+
+volumes:
+  storage_data:
