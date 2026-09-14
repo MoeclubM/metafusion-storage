@@ -58,6 +58,8 @@ func main() {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Header("X-Frame-Options", "SAMEORIGIN")
+		// 切流自检用：响应头标明是哪个服务答复的，便于确认网关把前缀切到了目标上游。
+		c.Header("X-MetaFusion-Service", "metafusion-storage")
 		c.Next()
 	})
 
