@@ -29,6 +29,10 @@ type fakeS3 struct {
 	nextID  int
 	// 记录收到的请求，供断言签名 URL 是否真的被用上。
 	puts int
+	// bucketMissing 为真时 HEAD /<bucket> 返回 404，用于验证服务会自己建桶。
+	bucketMissing bool
+	// created 记录收到的建桶请求（PUT /<bucket>）。
+	created int
 }
 
 func newFakeS3(t *testing.T) (*httptest.Server, *fakeS3) {
@@ -45,7 +49,15 @@ func newFakeS3(t *testing.T) (*httptest.Server, *fakeS3) {
 
 		switch {
 		case r.Method == http.MethodHead && key == "":
+			if f.bucketMissing {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			w.WriteHeader(http.StatusOK) // 桶存在
+		case r.Method == http.MethodPut && key == "":
+			f.bucketMissing = false // 建桶：之后的存在性探测都应通过
+			f.created++
+			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodGet && key == "":
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte("<LocationConstraint></LocationConstraint>"))
@@ -184,6 +196,32 @@ func readAll(r *http.Request) []byte {
 func quoteETag(body []byte) string {
 	sum := md5.Sum(body)
 	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// 桶不存在时由服务自己创建：这是"一条命令部署"能跑通的前提，
+// 也替代了原先依赖 minio/mc 镜像的一次性初始化容器（该镜像已从 Docker Hub 撤下）。
+func TestBucketBootstrappedWhenMissing(t *testing.T) {
+	srv, fake := newFakeS3(t)
+	fake.bucketMissing = true
+	s := newStoreAgainst(t, srv.URL)
+	if s.bucket != "metafusion-test" {
+		t.Fatalf("bucket = %q", s.bucket)
+	}
+	if fake.created != 1 {
+		t.Fatalf("应恰好发起一次建桶请求，实际 %d", fake.created)
+	}
+	if s.Local() {
+		t.Fatal("配置了 S3 端点时不应是本地模式")
+	}
+}
+
+// 桶已存在时不得重复建桶（否则每次启动都会多一次写请求，且并发启动会互相干扰）。
+func TestBucketNotRecreatedWhenPresent(t *testing.T) {
+	srv, fake := newFakeS3(t)
+	_ = newStoreAgainst(t, srv.URL)
+	if fake.created != 0 {
+		t.Fatalf("桶已存在时不应建桶，实际发起 %d 次", fake.created)
+	}
 }
 
 func newStoreAgainst(t *testing.T, endpoint string) *Store {

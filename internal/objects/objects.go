@@ -61,17 +61,37 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	exists, err := client.BucketExists(probe, cfg.S3Bucket)
-	if err != nil {
-		return nil, fmt.Errorf("object store unavailable: %w", err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("bucket %s missing", cfg.S3Bucket)
+	if err = ensureBucket(probe, client, cfg.S3Bucket); err != nil {
+		return nil, err
 	}
 	s.client, s.core, s.signer = client, core, signer
 	return s, nil
+}
+
+// ensureBucket 保证本服务的桶存在，桶由拥有它的服务自己创建。
+//
+// 原先交给一次性初始化容器（minio/mc 镜像）创建，代价是：多一个外部镜像依赖
+// （该镜像已从 Docker Hub 撤下，拉不到就整条部署链失败），多一类"初始化容器没
+// 跑完就启动"的顺序故障，而存储服务本身已经连着对象存储，判定条件完全一致。
+// 先查后建；并发下两个实例同时建时按"已存在"容忍，因此本函数幂等。
+func ensureBucket(ctx context.Context, client *minio.Client, bucket string) error {
+	exists, err := client.BucketExists(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("object store unavailable: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if err = client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		switch minio.ToErrorResponse(err).Code {
+		case "BucketAlreadyOwnedByYou", "BucketAlreadyExists":
+			return nil
+		}
+		return fmt.Errorf("create bucket %s: %w", bucket, err)
+	}
+	return nil
 }
 
 // Local 表示当前是本地对象模式：没有预签名，直传走服务端流式接收端点。
