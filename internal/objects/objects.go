@@ -140,7 +140,11 @@ func (s *Store) PresignParts(ctx context.Context, key, mime string, partCount in
 	return urls, nil
 }
 
-// CompleteUpload 合并分片；单次 PUT 上传时调用方传空 parts，此处只做存在性确认。
+// CompleteUpload 合并分片并返回对象的**实际大小**。
+//
+// 大小一律用 HEAD 回读得到，不用 CompleteMultipartUpload 的返回值：
+// S3 的合并响应体里没有对象长度，客户端库在该路径上返回的 Size 是 0，
+// 直接采信会让"声明大小 vs 实际大小"的校验永远不通过（上传被误判为 size_mismatch）。
 func (s *Store) CompleteUpload(ctx context.Context, key, uploadID string, parts []Part) (int64, error) {
 	if s.local {
 		return 0, nil
@@ -150,11 +154,9 @@ func (s *Store) CompleteUpload(ctx context.Context, key, uploadID string, parts 
 		for _, p := range parts {
 			complete = append(complete, minio.CompletePart{PartNumber: p.PartNumber, ETag: p.ETag})
 		}
-		info, err := s.core.CompleteMultipartUpload(ctx, s.bucket, key, uploadID, complete, minio.PutObjectOptions{})
-		if err != nil {
+		if _, err := s.core.CompleteMultipartUpload(ctx, s.bucket, key, uploadID, complete, minio.PutObjectOptions{}); err != nil {
 			return 0, err
 		}
-		return info.Size, nil
 	}
 	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
