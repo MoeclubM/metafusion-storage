@@ -21,7 +21,7 @@ func TestSessionClientResolvesThroughAccountService(t *testing.T) {
 		if ck, err := r.Cookie("mf_session"); err == nil {
 			gotCookie = ck.Value
 		}
-		_, _ = w.Write([]byte(`{"id":"u-1","username":"kana","role":"editor"}`))
+		_, _ = w.Write([]byte(`{"id":"u-1","username":"kana","role":"editor","groups":["community_moderator"],"permissions":["community.post.create","community.topic.pin"]}`))
 	}))
 	defer srv.Close()
 
@@ -29,6 +29,14 @@ func TestSessionClientResolvesThroughAccountService(t *testing.T) {
 	p, ok := c.Resolve(context.Background(), "opaque-token", "cookie-token")
 	if !ok || p == nil || p.ID != "u-1" || p.Role != "editor" {
 		t.Fatalf("身份解析失败: %v %+v", ok, p)
+	}
+	// 组与权限码必须一并带回：兜底解析和本地验签要给出同一个 Principal 形状，
+	// 否则同一个人的能力会随"走哪条解析路径"而变。
+	if len(p.Groups) != 1 || p.Groups[0] != "community_moderator" {
+		t.Fatalf("groups 未透传: %+v", p.Groups)
+	}
+	if len(p.Permissions) != 2 || p.Permissions[0] != "community.post.create" || p.Permissions[1] != "community.topic.pin" {
+		t.Fatalf("permissions 未透传: %+v", p.Permissions)
 	}
 	if gotAuth != "Bearer opaque-token" || gotCookie != "cookie-token" {
 		t.Fatalf("凭据未原样透传: %q %q", gotAuth, gotCookie)

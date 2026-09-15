@@ -24,16 +24,25 @@ func TestNormalizeRole(t *testing.T) {
 	}
 }
 
-// 只有上传者本人或管理员可以完成/绑定/解绑文件。
+// 只有上传者本人或持 storage.asset.moderate 的审核者可以完成/绑定/解绑文件。
+// 拆分前的对应边界是"上传者本人或 role == admin"，这里逐条对齐，不放宽也不收紧。
 func TestCanManageAsset(t *testing.T) {
-	owner := &auth.Principal{ID: "u1", Role: "editor"}
-	admin := &auth.Principal{ID: "u2", Role: "admin"}
-	other := &auth.Principal{ID: "u3", Role: "editor"}
+	owner := &auth.Principal{ID: "u1", Role: "user"}
+	moderator := &auth.Principal{ID: "u2", Role: "user", Permissions: []string{"storage.asset.moderate"}}
+	legacyAdmin := &auth.Principal{ID: "u3", Role: "admin"}
+	revokedAdmin := &auth.Principal{ID: "u4", Role: "admin", Permissions: []string{"community.post.create"}}
+	other := &auth.Principal{ID: "u5", Role: "editor"}
 	if !canManageAsset(owner, "u1") {
 		t.Fatal("上传者应可管理自己的文件")
 	}
-	if !canManageAsset(admin, "u1") {
-		t.Fatal("管理员应可管理他人文件")
+	if !canManageAsset(moderator, "u1") {
+		t.Fatal("持 storage.asset.moderate 的成员应可管理他人文件")
+	}
+	if !canManageAsset(legacyAdmin, "u1") {
+		t.Fatal("老令牌（无 permissions）的管理员应仍可管理他人文件")
+	}
+	if canManageAsset(revokedAdmin, "u1") {
+		t.Fatal("后台收回权限组后，admin 角色不得再管理他人文件")
 	}
 	if canManageAsset(other, "u1") {
 		t.Fatal("无关用户不应可管理他人文件")

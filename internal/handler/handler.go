@@ -186,7 +186,9 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 		c.JSON(200, resp)
 		return
 	case err == nil:
-		if asset.UploaderID != p.ID && !auth.IsAdmin(p) {
+		// 续传/覆盖他人尚未完成的上传是跨用户处置，用 storage.asset.moderate
+		// （拆分前这里是 role == admin：语义相同，只是改成认权限组）。
+		if asset.UploaderID != p.ID && !p.Can(auth.PermissionAssetModerate) {
 			fail(c, 409, "upload_in_progress")
 			return
 		}
@@ -280,9 +282,11 @@ func (h *Handler) createBinding(ctx context.Context, assetID, entityID, kind, ro
 	return b, nil
 }
 
-// canManageAsset 是纯函数：上传者本人或管理员可完成/绑定/解绑。
+// canManageAsset 是纯函数：上传者本人，或持有 storage.asset.moderate 的审核者，
+// 可完成/绑定/解绑。前者是所有权（自己的文件自己收尾），后者是审核权
+// （代替拆分前的 role == admin，见 internal/auth/permission.go 的备注）。
 func canManageAsset(p *auth.Principal, uploader string) bool {
-	return p != nil && (p.ID == uploader || p.Role == "admin")
+	return p != nil && (p.ID == uploader || p.Can(auth.PermissionAssetModerate))
 }
 
 func (h *Handler) completeUpload(c *gin.Context) {

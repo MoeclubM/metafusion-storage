@@ -16,7 +16,8 @@ import (
 // 异常多的绑定不值得为一次下载打穿目录服务。
 const maxBindingProbe = 20
 
-// readable 是文件读取的唯一判定：上传者/管理员直通，其余人只要**任一**绑定目标可见即可读。
+// readable 是文件读取的唯一判定：上传者本人或持 storage.asset.moderate 的审核者直通，
+// 其余人只要**任一**绑定目标可见即可读（直通档位同 canManageAsset，替换拆分前的 role == admin）。
 // 与下载、预览、哈希校验共用同一判定，避免同一份文件在不同接口上口径不同。
 func (h *Handler) readable(c *gin.Context, asset store.Asset) bool {
 	p := auth.Current(c)
@@ -188,7 +189,9 @@ func (h *Handler) verifyHash(c *gin.Context) {
 }
 
 func (h *Handler) stats(c *gin.Context) {
-	if !auth.IsAdmin(auth.Current(c)) {
+	// 全局容量是运营数据，跨所有上传者：用 storage.asset.moderate，
+	// 与拆分前「仅管理员可看」一致（不是任何人都能从令牌拿到的公开统计）。
+	if !auth.Current(c).Can(auth.PermissionAssetModerate) {
 		fail(c, 403, "forbidden")
 		return
 	}

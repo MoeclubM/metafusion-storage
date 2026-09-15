@@ -20,12 +20,17 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/config"
 )
 
-// Principal 是验签后的调用者身份。只信令牌里的三位信息；
-// 具体能编辑、能下载什么由各服务自己按业务规则判断。
+// Principal 是验签后的调用者身份。只信令牌里的字段：
+// Role 是历史兼容字段（admin/editor/user），Groups 是组码、Permissions 是按组展开后的
+// 权限码集合，均由账号服务随令牌与 /api/auth/me 下发——字段名与签发侧逐字一致
+// （metafusion-auth/internal/store/{token.go,store.go}）。
+// 具体能编辑、能下载什么由本服务按权限码判断，见 permission.go。
 type Principal struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	ID          string   `json:"id"`
+	Username    string   `json:"username"`
+	Role        string   `json:"role"`
+	Groups      []string `json:"groups,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 // SessionResolver 是存量令牌的兜底：用户可能还持有登录时发的不透明会话令牌（不是 JWT）。
@@ -72,14 +77,18 @@ func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Pr
 		return nil, false
 	}
 	var user struct {
-		ID       string `json:"id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
+		ID          string   `json:"id"`
+		Username    string   `json:"username"`
+		Role        string   `json:"role"`
+		Groups      []string `json:"groups,omitempty"`
+		Permissions []string `json:"permissions,omitempty"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&user); err != nil || user.ID == "" {
 		return nil, false
 	}
-	return &Principal{ID: user.ID, Username: user.Username, Role: user.Role}, true
+	// 组与权限码原样带入：兜底解析与本地验签必须给出同一个 Principal 形状，
+	// 否则"会话令牌能用、访问令牌不能用"这类差异只会在线上暴露。
+	return &Principal{ID: user.ID, Username: user.Username, Role: user.Role, Groups: user.Groups, Permissions: user.Permissions}, true
 }
 
 // Verifier 只做一件事：把请求换算成身份。
@@ -98,8 +107,10 @@ type Verifier struct {
 }
 
 type claims struct {
-	Username string `json:"preferred_username"`
-	Role     string `json:"role"`
+	Username    string   `json:"preferred_username"`
+	Role        string   `json:"role"`
+	Groups      []string `json:"groups,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -191,7 +202,7 @@ func (v *Verifier) Verify(token string) (*Principal, error) {
 	if c.Subject == "" {
 		return nil, errors.New("token without subject")
 	}
-	return &Principal{ID: c.Subject, Username: c.Username, Role: c.Role}, nil
+	return &Principal{ID: c.Subject, Username: c.Username, Role: c.Role, Groups: c.Groups, Permissions: c.Permissions}, nil
 }
 
 func (v *Verifier) publicKey(kid string) (*rsa.PublicKey, error) {
@@ -343,6 +354,3 @@ func Current(c *gin.Context) *Principal {
 	}
 	return nil
 }
-
-// IsAdmin 是纯函数：仅 admin 角色可管理他人文件。
-func IsAdmin(p *Principal) bool { return p != nil && p.Role == "admin" }

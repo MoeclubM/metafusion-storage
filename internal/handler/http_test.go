@@ -54,7 +54,14 @@ func jwksServer(t *testing.T, key *rsa.PrivateKey) (*httptest.Server, string) {
 
 func signToken(t *testing.T, key *rsa.PrivateKey, kid, role string) string {
 	t.Helper()
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+	return signTokenWith(t, key, kid, role, nil, nil)
+}
+
+// signTokenWith 是带授权声明的签发：groups/permissions 与账号服务一致
+// （admin 组的权限码是 *）。两者都为空即"老令牌"——没有权限码，只能按角色兜底。
+func signTokenWith(t *testing.T, key *rsa.PrivateKey, kid, role string, groups, perms []string) string {
+	t.Helper()
+	payload := jwt.MapClaims{
 		"sub":                "11111111-1111-1111-1111-111111111111",
 		"preferred_username": "kana",
 		"role":               role,
@@ -62,7 +69,14 @@ func signToken(t *testing.T, key *rsa.PrivateKey, kid, role string) string {
 		"aud":                testAudience,
 		"exp":                time.Now().Add(10 * time.Minute).Unix(),
 		"iat":                time.Now().Unix(),
-	})
+	}
+	if len(groups) > 0 {
+		payload["groups"] = groups
+	}
+	if len(perms) > 0 {
+		payload["permissions"] = perms
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, payload)
 	token.Header["kid"] = kid
 	signed, err := token.SignedString(key)
 	if err != nil {
@@ -99,7 +113,10 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "anonymous"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"id": p.ID, "role": p.Role})
+		c.JSON(http.StatusOK, gin.H{
+			"id": p.ID, "role": p.Role, "groups": p.Groups,
+			"moderate": p.Can(auth.PermissionAssetModerate),
+		})
 	})
 
 	w := httptest.NewRecorder()
@@ -108,17 +125,55 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 		t.Fatalf("匿名应为 401，实际 %d", w.Code)
 	}
 
+	var got struct {
+		ID       string   `json:"id"`
+		Role     string   `json:"role"`
+		Groups   []string `json:"groups"`
+		Moderate bool     `json:"moderate"`
+	}
+
+	// 权益令牌：permissions 里的存储审核码必须一路还原到 Principal 上（本服务不查账号服务的库）。
 	req := httptest.NewRequest(http.MethodGet, "/api/probe", nil)
-	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "admin"))
+	req.Header.Set("Authorization", "Bearer "+signTokenWith(t, key, kid, "user",
+		[]string{"storage_moderator"}, []string{"storage.asset.moderate"}))
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("带令牌应 200，实际 %d（%s）", w.Code, w.Body.String())
 	}
-	var got map[string]string
+	got = struct {
+		ID       string   `json:"id"`
+		Role     string   `json:"role"`
+		Groups   []string `json:"groups"`
+		Moderate bool     `json:"moderate"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if got.ID == "" || got.Role != "user" || len(got.Groups) != 1 || got.Groups[0] != "storage_moderator" {
+		t.Fatalf("身份还原不符: %+v", got)
+	}
+	if !got.Moderate {
+		t.Fatalf("令牌里的 storage.asset.moderate 未被认账: %+v", got)
+	}
+
+	// 老令牌（无 groups/permissions）：admin 角色仍可用，语义与拆分前一致。
+	req = httptest.NewRequest(http.MethodGet, "/api/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "admin"))
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("老令牌应 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	got = struct {
+		ID       string   `json:"id"`
+		Role     string   `json:"role"`
+		Groups   []string `json:"groups"`
+		Moderate bool     `json:"moderate"`
+	}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
-	if got["role"] != "admin" {
-		t.Fatalf("身份还原不符: %v", got)
+	if got.Role != "admin" || !got.Moderate {
+		t.Fatalf("老令牌身份还原不符: %+v", got)
 	}
 }
 
@@ -163,5 +218,40 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/storage/entities/not-a-uuid/files", nil))
 	if w.Code != 404 {
 		t.Fatalf("非法实体 id 应 404，实际 %d", w.Code)
+	}
+}
+
+// 权限闸门确实接在路由上：只有拿到 storage.asset.moderate 才可读全局统计。
+// 三种"看起来像管理员"的令牌都必须被拒——老令牌的 editor、只有论坛码的成员，
+// 以及后台已收回存储权限组、但 role 仍是 admin 的旧账号（角色不得再绕过权限组）。
+// 拒绝发生在触碰数据库之前，所以空库（&store.Store{}）足以判定。
+func TestStatsRequiresModeratePermission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv, kid := jwksServer(t, key)
+	verifier := newVerifier(t, srv.URL)
+	r := gin.New()
+	New(&store.Store{}, &objects.Store{}, catalog.New(""), verifier, config.Config{}).Register(r)
+
+	cases := []struct {
+		name  string
+		role  string
+		perms []string
+	}{
+		{"老令牌的 editor", "editor", nil},
+		{"只有论坛码的成员", "user", []string{"community.post.create"}},
+		{"收回权限组的旧管理员", "admin", []string{"community.post.create"}},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/api/storage/stats", nil)
+		req.Header.Set("Authorization", "Bearer "+signTokenWith(t, key, kid, tc.role, nil, tc.perms))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s 读全局统计应 403，实际 %d（%s）", tc.name, w.Code, w.Body.String())
+		}
 	}
 }
