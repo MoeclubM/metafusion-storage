@@ -44,6 +44,14 @@ type Config struct {
 	// MaxUploadMB 服务端接收路径（本地对象模式/兜底）的单次上传上限，0 表示不限制。
 	// 直传路径的上限由对象存储与网关决定，不受这里影响。
 	MaxUploadMB int
+	// VerifyMaxMB 是 complete 阶段服务端回读对象、重算 sha256 的**单对象大小上限**：
+	// 直传路径的内容没有被服务端逐字节收过，只能在落定前整份读回一次，代价随对象线性增长。
+	// 超限即显式失败（hash_verify_too_large），资产留在 pending，绝不"跳过校验但置 complete"。
+	// 0 表示不限制——与大文件优先的默认取向一致，需要收敛时由运维按对象存储带宽设定。
+	VerifyMaxMB int
+	// VerifyTimeout 是同一段回读的墙钟上限：读不完即失败（verify_timeout），同样不跳过校验。
+	// 0 表示不限制，与"刻意不设 ReadTimeout/WriteTimeout"的大文件取向一致。
+	VerifyTimeout time.Duration
 }
 
 func Load() Config {
@@ -66,6 +74,8 @@ func Load() Config {
 		PresignTTL:       time.Duration(envInt("STORAGE_PRESIGN_TTL_MINUTES", 120)) * time.Minute,
 		MaxPartCount:     envInt("STORAGE_MAX_PARTS", 10000),
 		MaxUploadMB:      envInt("STORAGE_MAX_UPLOAD_MB", 0),
+		VerifyMaxMB:      envInt("STORAGE_VERIFY_MAX_MB", 0),
+		VerifyTimeout:    time.Duration(envInt("STORAGE_VERIFY_TIMEOUT_SECONDS", 0)) * time.Second,
 	}
 	if c.S3PublicEndpoint == "" {
 		c.S3PublicEndpoint = c.S3Endpoint

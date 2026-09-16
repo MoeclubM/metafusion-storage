@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -19,6 +20,21 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
 )
+
+// humanBytes / humanDuration 只用于启动日志：0 表示"不限制"，不能打成 0 MB / 0s。
+func humanBytes(n int64) string {
+	if n <= 0 {
+		return "unlimited"
+	}
+	return strconv.FormatInt(n>>20, 10) + "MiB"
+}
+
+func humanDuration(d time.Duration) string {
+	if d <= 0 {
+		return "unlimited"
+	}
+	return d.String()
+}
 
 func main() {
 	cfg := config.Load()
@@ -41,6 +57,10 @@ func main() {
 	if objs.Local() {
 		log.Print("STORAGE_S3_ENDPOINT is unset; using the local object store under " + cfg.Root)
 	}
+	// 回读校验的上限必须能被运维看见：complete 的大文件失败排查第一步就是确认这两个值，
+	// 只写在环境变量里的话，"为什么这份对象被判 hash_verify_too_large"要靠猜。
+	log.Printf("upload hash verification: max object size %s, read-back timeout %s",
+		humanBytes(objs.VerifyMaxBytes()), humanDuration(objs.VerifyTimeout()))
 
 	cat := catalog.New(cfg.CatalogURL)
 	verifier, err := auth.New(cfg)

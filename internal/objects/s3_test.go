@@ -30,6 +30,9 @@ type fakeS3 struct {
 	nextID  int
 	// 记录收到的请求，供断言签名 URL 是否真的被用上。
 	puts int
+	// getDelay 是每次 GET 读取前的等待，用于给出确定性的"回读超时"场景：
+	// 单个块固定延迟 2ms，8MiB 对象要读 128 块 ≈ 0.25s，远高于测试里设的墙钟上限。
+	getDelay time.Duration
 	// bucketMissing 为真时 HEAD /<bucket> 返回 404，用于验证服务会自己建桶。
 	bucketMissing bool
 	// created 记录收到的建桶请求（PUT /<bucket>）。
@@ -102,6 +105,9 @@ func newFakeS3(t *testing.T) (*httptest.Server, *fakeS3) {
 			f.objects[key] = body
 			w.Header().Set("ETag", quoteETag(body))
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete:
+			delete(f.objects, key)
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodHead:
 			body, ok := f.objects[key]
 			if !ok {
@@ -124,6 +130,23 @@ func newFakeS3(t *testing.T) (*httptest.Server, *fakeS3) {
 			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(http.StatusOK)
+			if f.getDelay > 0 {
+				// 分块写出：客户端每读一块都要等一次延迟，读不完的对象必然撞上上限。
+				for off := 0; off < len(body); off += 64 << 10 {
+					end := off + 64<<10
+					if end > len(body) {
+						end = len(body)
+					}
+					time.Sleep(f.getDelay)
+					if _, err := w.Write(body[off:end]); err != nil {
+						return
+					}
+					if flusher, ok := w.(http.Flusher); ok {
+						flusher.Flush()
+					}
+				}
+				return
+			}
 			_, _ = w.Write(body)
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
@@ -227,6 +250,13 @@ func TestBucketNotRecreatedWhenPresent(t *testing.T) {
 
 func newStoreAgainst(t *testing.T, endpoint string) *Store {
 	t.Helper()
+	return newStoreWithLimits(t, endpoint, 0, 0)
+}
+
+// newStoreWithLimits 与 newStoreAgainst 同源，另外把回读校验的两个上限带进 Store；
+// 上限为 0 即不限制（默认取向）。
+func newStoreWithLimits(t *testing.T, endpoint string, verifyMaxMB int, verifyTimeout time.Duration) *Store {
+	t.Helper()
 	cfg := config.Config{
 		Root:             t.TempDir(),
 		S3Endpoint:       endpoint,
@@ -236,6 +266,8 @@ func newStoreAgainst(t *testing.T, endpoint string) *Store {
 		S3Bucket:         "metafusion-test",
 		S3TLS:            false,
 		PresignTTL:       5 * time.Minute,
+		VerifyMaxMB:      verifyMaxMB,
+		VerifyTimeout:    verifyTimeout,
 	}
 	s, err := New(context.Background(), cfg)
 	if err != nil {

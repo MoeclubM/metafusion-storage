@@ -179,7 +179,18 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 
 	p := auth.Current(c)
 	ctx := c.Request.Context()
-	asset, err := h.db.AssetByHash(ctx, in.SHA256Hash)
+
+	// 命中分两种，判据必须分开：
+	//  1. **已验证**的资产才能秒传（complete 态由 CompleteAsset 保证 hash_verified=true）；
+	//  2. 未验证的未完成资产（上传中、或回读校验失败过）不能秒传，但必须按
+	//     "同一 sha256 的未完成上传由上传者本人续传"的既有口径继续处理——
+	//     校验失败的上传者重传正确内容才能收尾。若这里直接当"不存在"去新建资产，
+	//     就会撞上 assets_sha256 唯一索引（那行 pending 占位行还在），
+	//     结果是这个 sha256 被一次失败上传永久占死，谁也传不了。
+	asset, err := h.db.VerifiedAssetByHash(ctx, in.SHA256Hash)
+	if errors.Is(err, store.ErrNotFound) {
+		asset, err = h.db.AssetByHash(ctx, in.SHA256Hash)
+	}
 	switch {
 	case err == nil && asset.Status == "complete":
 		resp := initiateResponse{IsInstantUpload: true, AssetID: asset.ID, ObjectKey: asset.ObjectKey, Asset: &asset}
@@ -330,6 +341,12 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		c.JSON(200, gin.H{"asset": asset, "already_complete": true})
 		return
 	}
+	// 客户端声明的大小已经超上限时不必先合并：回读校验注定失败，
+	// 提前失败也避免为一份不可能发布的资产在对象存储里留下碎片。
+	if limit := h.objects.VerifyMaxBytes(); limit > 0 && asset.DeclaredSize > limit {
+		fail(c, 413, "hash_verify_too_large")
+		return
+	}
 	uploadID := in.UploadID
 	if uploadID == "" {
 		uploadID = asset.MultipartUploadID
@@ -340,7 +357,8 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		return
 	}
 	if h.objects.Local() {
-		// 本地模式由直传端点负责落定，complete 只做幂等确认。
+		// 本地模式没有预签名直传：对象由 /upload/stream 边收边算摘要后落定，
+		// complete 只做幂等确认（该路径已在 streamUpload 里验过摘要）。
 		c.JSON(200, gin.H{"asset": asset})
 		return
 	}
@@ -349,13 +367,56 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		fail(c, 409, "size_mismatch")
 		return
 	}
-	if err = h.db.CompleteAsset(ctx, asset.ID, size); err != nil {
+	// 预签名路径的内容从未经过服务端：落定前必须整份回读、重算 sha256 再比对。
+	// 大小一致不足以证明内容一致——等长的另一份内容完全可能挂在同一个 sha256 键上。
+	started := time.Now()
+	digest, read, verr := h.objects.VerifyHash(ctx, asset.ObjectKey, asset.SHA256)
+	if verr != nil {
+		// 校验没通过就没有"完成"可谈：资产留在 pending（既不参与秒传也不可下载），
+		// 摘要不符的原始对象也一并中止/删除，不给内容寻址键留污染对象。
+		reason, status := verifyError(verr)
+		h.log.Printf("storage: asset %s 回读校验失败 code=%s size=%d read=%d elapsed=%s err=%v",
+			asset.ID, reason, size, read, time.Since(started), verr)
+		if !errors.Is(verr, objects.ErrVerifyTooLarge) {
+			_ = h.objects.AbortUpload(ctx, asset.ObjectKey, uploadID)
+		}
+		_ = h.objects.Remove(ctx, asset.ObjectKey)
+		if merr := h.db.MarkHashMismatch(ctx, asset.ID, reason); merr != nil {
+			h.log.Printf("storage: asset %s 记录校验失败原因出错: %v", asset.ID, merr)
+		}
+		fail(c, status, reason)
+		return
+	}
+	if err = h.db.MarkHashVerified(ctx, asset.ID, read); err != nil {
+		fail(c, 500, "module_error")
+		return
+	}
+	if err = h.db.CompleteAsset(ctx, asset.ID, read); err != nil {
+		// 到这里 hash_verified 已经为真，ErrAssetUnverified 只会在数据被外部改坏时出现。
 		fail(c, 500, "module_error")
 		return
 	}
 	asset.Status = "complete"
-	asset.SizeBytes = size
+	asset.SizeBytes = read
+	asset.HashVerified = true
+	h.log.Printf("storage: asset %s 回读校验通过 sha256=%s size=%d elapsed=%s", asset.ID, digest, read, time.Since(started))
 	c.JSON(200, gin.H{"asset": asset})
+}
+
+// verifyError 把回读校验的失败原因翻成对外错误码与状态码（纯函数，便于离线固定口径）：
+// 摘要不符是客户端内容错了（409），超限与超时是这份对象太大/太慢（413、408）。
+// 其它读取失败不是"内容错"，按 503 处理，避免把对象存储故障说成上传者的问题。
+func verifyError(err error) (code string, status int) {
+	switch {
+	case errors.Is(err, objects.ErrHashMismatch):
+		return "hash_mismatch", 409
+	case errors.Is(err, objects.ErrVerifyTooLarge):
+		return "hash_verify_too_large", 413
+	case errors.Is(err, objects.ErrVerifyTimeout):
+		return "verify_timeout", 408
+	default:
+		return "storage_unavailable", 503
+	}
 }
 
 // streamUpload 是服务端接收路径：本地对象模式的主要上传方式，
@@ -394,7 +455,7 @@ func (h *Handler) streamUpload(c *gin.Context) {
 		fail(c, 400, "upload_failed")
 		return
 	}
-	if err := h.db.MarkHashVerified(ctx, asset.ID, true, size); err != nil {
+	if err := h.db.MarkHashVerified(ctx, asset.ID, size); err != nil {
 		fail(c, 500, "module_error")
 		return
 	}

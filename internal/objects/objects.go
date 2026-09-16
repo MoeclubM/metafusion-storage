@@ -35,16 +35,27 @@ type Store struct {
 	bucket string
 	local  bool
 	ttl    time.Duration
-	client *minio.Client
-	core   *minio.Core
-	signer *minio.Client
+	// verifyMaxBytes / verifyTimeout 是 complete 阶段回读重算摘要的上限（0 为不限制）。
+	// 放在 Store 上而不是逐个调用点传参：上限是"这类对象存储能承受多大的整份回读"的
+	// 部署属性，不是单次请求的属性。
+	verifyMaxBytes int64
+	verifyTimeout  time.Duration
+	client         *minio.Client
+	core           *minio.Core
+	signer         *minio.Client
 }
 
 func New(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err := os.MkdirAll(cfg.Root, 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{root: cfg.Root, bucket: cfg.S3Bucket, ttl: cfg.PresignTTL}
+	s := &Store{
+		root:           cfg.Root,
+		bucket:         cfg.S3Bucket,
+		ttl:            cfg.PresignTTL,
+		verifyMaxBytes: int64(cfg.VerifyMaxMB) << 20,
+		verifyTimeout:  cfg.VerifyTimeout,
+	}
 	if cfg.S3Endpoint == "" {
 		s.local = true
 		return s, nil
@@ -266,6 +277,20 @@ func (s *Store) PutStream(ctx context.Context, key string, r io.Reader, expected
 	return size, digest, nil
 }
 
+// Remove 删除对象，用于清掉内容寻址键上的"校验没通过"的对象：
+// 键是 sha256，键上留着与声明不符的内容，就等于把这个 sha256 的位置一直占着
+// （本服务不签发带条件头的直传地址，无法在发布前拦住客户端写什么）。
+func (s *Store) Remove(ctx context.Context, key string) error {
+	if s.local {
+		err := os.Remove(filepath.Join(s.root, filepath.FromSlash(key)))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+}
+
 // Open 打开对象内容，用于服务端校验哈希或本地模式下载。
 func (s *Store) Open(ctx context.Context, key string) (io.ReadSeekCloser, int64, error) {
 	if s.local {
@@ -292,16 +317,7 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadSeekCloser, int64,
 	return obj, info.Size, nil
 }
 
-// HashOf 读回对象并计算 sha256，用于校验声明哈希与实际内容是否一致。
+// HashOf 读回对象并计算 sha256（不带声明比对与上限），保留给"只看内容摘要"的调用方。
 func (s *Store) HashOf(ctx context.Context, key string) (string, int64, error) {
-	obj, size, err := s.Open(ctx, key)
-	if err != nil {
-		return "", 0, err
-	}
-	defer obj.Close()
-	hash := sha256.New()
-	if _, err = io.Copy(hash, obj); err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), size, nil
+	return s.VerifyHash(ctx, key, "")
 }

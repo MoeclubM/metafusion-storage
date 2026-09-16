@@ -14,6 +14,11 @@ import (
 // ErrNotFound 表示目标记录不存在（调用方据此回 404，不区分权限与不存在）。
 var ErrNotFound = errors.New("not_found")
 
+// ErrAssetUnverified 表示尝试把一个 hash_verified=false 的资产置为完成。
+// 内容寻址的前提是"键上的内容确实等于该 sha256"：完成态只能由服务端回读校验
+// 通过（VerifyHash）或流式上传边收边算（PutStream）产生，没有第三条路。
+var ErrAssetUnverified = errors.New("asset_unverified")
+
 // schema 是存储服务自有的 storage schema。服务只读写自己的表，
 // 不 JOIN 目录库；实体可见性一律通过 catalog 的 HTTP 契约询问。
 // 版本化迁移待补：当前用幂等 DDL 建表，与主仓库 modules 包的做法一致。
@@ -29,6 +34,9 @@ CREATE TABLE IF NOT EXISTS storage.assets(
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','complete')),
   multipart_upload_id text NOT NULL DEFAULT '',
   hash_verified boolean NOT NULL DEFAULT false,
+  -- fail_reason 记下服务端回读校验的失败原因（hash_mismatch / verify_timeout /
+  -- hash_verify_too_large）：这些资产会一直留在 pending，不落原因就只剩"没完成"可查。
+  fail_reason text NOT NULL DEFAULT '',
   uploader_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   completed_at timestamptz
@@ -51,19 +59,21 @@ CREATE INDEX IF NOT EXISTS bindings_asset ON storage.bindings(asset_id);
 
 // Asset 是一份物理文件的内容寻址记录：身份是 sha256，不含任何目录语义。
 type Asset struct {
-	ID                string     `json:"id"`
-	SHA256            string     `json:"sha256"`
-	SizeBytes         int64      `json:"size_bytes"`
-	DeclaredSize      int64      `json:"declared_size"`
-	MimeType          string     `json:"mime_type"`
-	FileName          string     `json:"file_name"`
-	ObjectKey         string     `json:"object_key"`
-	Status            string     `json:"status"`
-	MultipartUploadID string     `json:"multipart_upload_id,omitempty"`
-	HashVerified      bool       `json:"hash_verified"`
-	UploaderID        string     `json:"uploader_id"`
-	CreatedAt         time.Time  `json:"created_at"`
-	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	ID                string `json:"id"`
+	SHA256            string `json:"sha256"`
+	SizeBytes         int64  `json:"size_bytes"`
+	DeclaredSize      int64  `json:"declared_size"`
+	MimeType          string `json:"mime_type"`
+	FileName          string `json:"file_name"`
+	ObjectKey         string `json:"object_key"`
+	Status            string `json:"status"`
+	MultipartUploadID string `json:"multipart_upload_id,omitempty"`
+	HashVerified      bool   `json:"hash_verified"`
+	UploaderID        string `json:"uploader_id"`
+	// FailReason 只在服务端回读校验失败时写入，供运维与上传者定位；不参与任何判定。
+	FailReason  string     `json:"fail_reason,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 // Binding 是"文件 → 目录实体"的挂载：用途用 binding_role 表达（track_audio、disc_image…），
@@ -105,15 +115,22 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) Init(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, schema)
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, alterSchema)
 	return err
 }
 
-const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,uploader_id,created_at,completed_at"
+const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,fail_reason,uploader_id,created_at,completed_at"
+
+// alterSchema 补建已存在实例缺的列：CREATE TABLE IF NOT EXISTS 对既有表是空操作，
+// 新增列必须单独写一条幂等 DDL，否则升级后的实例连查询都会因缺列直接失败。
+const alterSchema = "ALTER TABLE storage.assets ADD COLUMN IF NOT EXISTS fail_reason text NOT NULL DEFAULT '';"
 
 func scanAsset(row interface{ Scan(...any) error }) (Asset, error) {
 	var a Asset
-	err := row.Scan(&a.ID, &a.SHA256, &a.SizeBytes, &a.DeclaredSize, &a.MimeType, &a.FileName, &a.ObjectKey, &a.Status, &a.MultipartUploadID, &a.HashVerified, &a.UploaderID, &a.CreatedAt, &a.CompletedAt)
+	err := row.Scan(&a.ID, &a.SHA256, &a.SizeBytes, &a.DeclaredSize, &a.MimeType, &a.FileName, &a.ObjectKey, &a.Status, &a.MultipartUploadID, &a.HashVerified, &a.FailReason, &a.UploaderID, &a.CreatedAt, &a.CompletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -126,6 +143,16 @@ func (s *Store) Asset(ctx context.Context, id string) (Asset, error) {
 
 func (s *Store) AssetByHash(ctx context.Context, sha256 string) (Asset, error) {
 	return scanAsset(s.db.QueryRowContext(ctx, "SELECT "+assetCols+" FROM storage.assets WHERE sha256=$1", sha256))
+}
+
+// VerifiedAssetByHash 只返回**服务端已验过内容**的资产，供秒传/查重使用。
+//
+// 查重采信的是"这个 sha256 的内容已经在库里"，而唯一能证明这一点的字段是 hash_verified：
+// 预签名直传路径 initiate 时只能采信客户端声明的摘要，若在这里不过滤，
+// 一份等长的错内容就能把这个 sha256 占住，之后所有秒传都会命中错内容。
+// 未验证的命中一律当作不存在，调用方继续走正常上传。
+func (s *Store) VerifiedAssetByHash(ctx context.Context, sha256 string) (Asset, error) {
+	return scanAsset(s.db.QueryRowContext(ctx, "SELECT "+assetCols+" FROM storage.assets WHERE sha256=$1 AND hash_verified", sha256))
 }
 
 func (s *Store) CreateAsset(ctx context.Context, a Asset) error {
@@ -141,16 +168,54 @@ func (s *Store) SetUploadSession(ctx context.Context, id, uploadID string) error
 }
 
 // CompleteAsset 落定文件大小与完成状态；size 一律覆盖——两条上传路径都在落定前
-// 算过真实字节数（直传按 HEAD 回读、流式按写入计数），不存在"为 0 就不覆盖"的分支。
+// 算过真实字节数（直传按回读校验、流式按写入计数），不存在"为 0 就不覆盖"的分支。
+//
+// 只认 hash_verified=true 的行：完成态就是"可被秒传复用"的公开态，未验证的资产
+// 不能被任何调用方（包括将来新增的上传路径）推到这个状态上。
 func (s *Store) CompleteAsset(ctx context.Context, id string, size int64) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET status='complete', size_bytes=$2, completed_at=now() WHERE id=$1", id, size)
-	return err
+	res, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET status='complete', size_bytes=$2, completed_at=now() WHERE id=$1 AND hash_verified", id, size)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAssetUnverified
+	}
+	return nil
 }
 
-// MarkHashVerified 记录服务端实际读回字节算出的 sha256 是否与声明一致。
-func (s *Store) MarkHashVerified(ctx context.Context, id string, verified bool, size int64) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET hash_verified=$2, size_bytes=$3 WHERE id=$1", id, verified, size)
-	return err
+// MarkHashVerified 记录服务端实际读回字节重算的摘要与声明一致，并落定大小。
+func (s *Store) MarkHashVerified(ctx context.Context, id string, size int64) error {
+	return s.markHash(ctx, id, true, size, "")
+}
+
+// MarkHashMismatch 记录服务端回读结果的摘要与声明不符：资产保持 pending（因此不参与
+// 秒传），大小不覆盖——declared_size 是客户端声明值，size_bytes 在未验证前只作参考，
+// 覆盖它会让统计与排查都失去基准。失败原因写入对象本身，授权实例可直接查到。
+func (s *Store) MarkHashMismatch(ctx context.Context, id, reason string) error {
+	return s.markHash(ctx, id, false, 0, reason)
+}
+
+// markHash 用一次事务合并两条改动：hash_verified=false 必然伴随 status='pending'。
+// 拆成两条独立语句时，中间态（已置为 pending/complete 但摘要字段未落）会在并发
+// 查重里被看见，而查重的判据正是这两个字段。
+func (s *Store) markHash(ctx context.Context, id string, verified bool, size int64, reason string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "UPDATE storage.assets SET hash_verified=$2 WHERE id=$1", id, verified); err != nil {
+		return err
+	}
+	if verified {
+		_, err = tx.ExecContext(ctx, "UPDATE storage.assets SET size_bytes=$2 WHERE id=$1", id, size)
+	} else {
+		_, err = tx.ExecContext(ctx, "UPDATE storage.assets SET status='pending', fail_reason=$2 WHERE id=$1", id, reason)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Bind(ctx context.Context, b Binding) error {
@@ -184,7 +249,7 @@ func (s *Store) Unbind(ctx context.Context, id string) error {
 // BindingsForEntity 列出挂在某个实体上的全部文件；调用方需先确认实体对请求者可见。
 func (s *Store) BindingsForEntity(ctx context.Context, entityID string) ([]FileBinding, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT b.id,b.asset_id,b.target_entity_id,b.target_kind,b.binding_role,b.created_by,b.created_at,
-		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.uploader_id,a.created_at,a.completed_at
+		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.fail_reason,a.uploader_id,a.created_at,a.completed_at
 		FROM storage.bindings b JOIN storage.assets a ON a.id=b.asset_id
 		WHERE b.target_entity_id=$1 ORDER BY b.created_at DESC LIMIT 500`, entityID)
 	if err != nil {
@@ -196,7 +261,7 @@ func (s *Store) BindingsForEntity(ctx context.Context, entityID string) ([]FileB
 		var f FileBinding
 		if err = rows.Scan(&f.ID, &f.AssetID, &f.TargetEntityID, &f.TargetKind, &f.BindingRole, &f.CreatedBy, &f.CreatedAt,
 			&f.Asset.ID, &f.Asset.SHA256, &f.Asset.SizeBytes, &f.Asset.DeclaredSize, &f.Asset.MimeType, &f.Asset.FileName, &f.Asset.ObjectKey,
-			&f.Asset.Status, &f.Asset.MultipartUploadID, &f.Asset.HashVerified, &f.Asset.UploaderID, &f.Asset.CreatedAt, &f.Asset.CompletedAt); err != nil {
+			&f.Asset.Status, &f.Asset.MultipartUploadID, &f.Asset.HashVerified, &f.Asset.FailReason, &f.Asset.UploaderID, &f.Asset.CreatedAt, &f.Asset.CompletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, f)

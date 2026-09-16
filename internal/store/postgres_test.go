@@ -94,11 +94,25 @@ func TestAssetLifecycleAndLocalObjects(t *testing.T) {
 	if loaded, err := s.Asset(ctx, asset.ID); err != nil || loaded.MultipartUploadID != uploadID {
 		t.Fatalf("分片会话未落库: %+v err=%v", loaded, err)
 	}
+	// 顺序即契约：摘要没验过就不许置完成（完成态就是可被秒传复用的公开态）。
+	if err = s.CompleteAsset(ctx, asset.ID, size); !errors.Is(err, ErrAssetUnverified) {
+		t.Fatalf("未验摘要就该拒绝完成，实际 %v", err)
+	}
+	if loaded, err := s.Asset(ctx, asset.ID); err != nil || loaded.Status != "pending" {
+		t.Fatalf("被拒后应仍是 pending: %+v err=%v", loaded, err)
+	}
+	// 查重只认已验内容的资产：未验证的命中必须当作不存在，否则错内容会被秒传出去。
+	if _, err := s.VerifiedAssetByHash(ctx, digest); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("未验证资产不得被查重命中，实际 %v", err)
+	}
+	if err = s.MarkHashVerified(ctx, asset.ID, size); err != nil {
+		t.Fatalf("mark verified: %v", err)
+	}
+	if verified, err := s.VerifiedAssetByHash(ctx, digest); err != nil || verified.ID != asset.ID {
+		t.Fatalf("验过摘要后应可被查重命中: %+v err=%v", verified, err)
+	}
 	if err = s.CompleteAsset(ctx, asset.ID, size); err != nil {
 		t.Fatalf("complete asset: %v", err)
-	}
-	if err = s.MarkHashVerified(ctx, asset.ID, true, size); err != nil {
-		t.Fatalf("mark verified: %v", err)
 	}
 	if loaded, err := s.Asset(ctx, asset.ID); err != nil || loaded.Status != "complete" || !loaded.HashVerified {
 		t.Fatalf("完成态不符: %+v err=%v", loaded, err)

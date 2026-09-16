@@ -18,14 +18,14 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
 | POST | `/upload/initiate` | 登录 | 直传第一步：命中 sha256 即秒传；否则签发预签名地址（分片则返回 upload_id 与每片地址）。同一 sha256 的未完成上传由上传者本人续传 |
-| POST | `/upload/complete` | 上传者/审核者 | 分片合并并落定大小；单次 PUT 场景只做存在性确认 |
+| POST | `/upload/complete` | 上传者/审核者 | 分片合并后**服务端回读对象重算 sha256**，与声明一致才置 complete 并记 `hash_verified`；不一致返回 `hash_mismatch`（409），超限/超时返回 `hash_verify_too_large`（413）/`verify_timeout`（408） |
 | PUT | `/upload/stream/{asset_id}` | 上传者/审核者 | 服务端流式接收（本地对象模式的主要上传方式，也可作为预签名不可用时的兜底）；落盘前流式计算 sha256 与声明比对 |
 | POST | `/bind` | 上传者/审核者 | 绑定到目录实体，带 `binding_role` 用途 |
 | DELETE | `/bindings/{id}` | 绑定创建者/上传者/审核者 | 解绑纠错 |
 | GET | `/assets/{id}` | 可读 | 文件元数据 + 绑定列表 |
 | GET | `/entities/{id}/files` | 实体可见 | 「这个介质/轨道/表达上挂了哪些文件」入口 |
 | GET | `/download/{asset_id}` | 可读 | 对象存储模式返回预签名下载地址；本地模式直接流式下发 |
-| POST | `/verify-hash` | 可读 | 只给 sha256 = 秒传探测；给 asset_id = 读回对象重算摘要并与声明比对 |
+| POST | `/verify-hash` | 可读 / 按 asset 校验需登录 | 只给 sha256 = 秒传探测（只认 `hash_verified=true` 的资产）；给 asset_id = 读回对象重算摘要并与声明比对，同样受回读上限约束 |
 | GET | `/stats` | 审核者 | 完成态文件数与占用字节 |
 
 读取可见性的口径只有一条：**上传者本人或审核者直通，其余人只要任一绑定目标实体可见即可读**。
@@ -70,14 +70,46 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 | `STORAGE_PRESIGN_TTL_MINUTES` | `120` | 预签名有效期 |
 | `STORAGE_MAX_PARTS` | `10000` | 单次上传最大分片数 |
 | `STORAGE_MAX_UPLOAD_MB` | `0` | 服务端接收路径的上限，`0` 为不限制（直传路径不受此限） |
+| `STORAGE_VERIFY_MAX_MB` | `0` | complete 阶段回读重算 sha256 的**单对象大小上限**，`0` 为不限制；超限返回 `hash_verify_too_large`，资产留在 pending，不置完成 |
+| `STORAGE_VERIFY_TIMEOUT_SECONDS` | `0` | 同一段回读的墙钟上限（秒），`0` 为不限制；超时返回 `verify_timeout`，同样不置完成 |
 
 服务**刻意不设** `ReadTimeout`/`WriteTimeout`：整盘镜像与视频的上传/下载都可能远超 30 秒，
 全局超时会直接截断慢传输（单体当前的 30 秒限制即此原因）。需要收敛时按路由单独加超时。
+
+两个 `STORAGE_VERIFY_*` 默认都不限制，与大文件优先的取向一致；它们的取舍是明确的：
+
+- 预签名直传的内容**没有经过服务端**，`initiate` 采信的 sha256 只是客户端声明，
+  因此 `complete` 必须把对象整份读回、重算摘要才能落定——代价随对象线性增长（一次完整读）。
+  **对象越大越可能撞上限**：超过上限的对象要显式失败（不会"跳过校验但置 complete"），
+  这类大文件应改走服务端流式接收 `PUT /upload/stream/{asset_id}`（边收边算，没有二次读回成本），
+  或分片上传并在 `complete` 前自行核对；
+- 客户端可以用 `POST /verify-hash`（带 `asset_id`）在收尾前先自检一次，提前拿到 `verified=false`，
+  不必等到 `complete` 才失败。
 
 配置了 `STORAGE_S3_ENDPOINT` 时，服务在启动阶段**自己保证桶存在**（`internal/objects` 的 `ensureBucket`：
 先 `BucketExists` 再 `MakeBucket`，并发下按"已存在"容忍，幂等）。
 桶不再由一次性的 `minio/mc` 初始化容器创建——该镜像已从 Docker Hub 撤下，拉不到会让整条部署链失败；
 桶归属服务本身，判定条件与"服务能否连上对象存储"完全一致，因此也不需要额外的启动顺序依赖。
+
+### 完成上传时的内容校验（P1 完整性约束）
+
+内容寻址的前提是"键上的内容确实等于该 sha256"。直传路径上这个前提**不由上传者承诺**，因此：
+
+- `complete` 在合并后回读对象、重算 sha256：一致才置 `complete` 并写 `hash_verified=true`；
+  不一致返回 `409 hash_mismatch`，资产留在 `pending`、`fail_reason` 记下原因，**绝不发布**；
+  同时删掉那个对不上声明的内容寻址键，避免它继续占位；
+- **秒传/查重只复用 `hash_verified=true` 的资产**（`internal/store` 的 `VerifiedAssetByHash`）：
+  `initiate`、`verify-hash` 的秒传探测都走这条判据，未验证命中一律按"没有"处理并继续正常上传；
+  `CompleteAsset` 本身也只认 `hash_verified=true` 的行，任何新增上传路径都无法把未验内容推成完成态；
+- 回读校验的两个上限见上方环境变量；超限/超时都是**可识别的显式失败**，不允许静默降级；
+- 失败上传留下的 `pending` 资产仍然占着该 sha256 的唯一索引（内容寻址只登记一份），
+  由**上传者本人**重传正确内容即可收尾；同一 sha256 换人上传会被唯一索引挡住。
+
+```bash
+# 冒烟：正确内容 → complete 200 且 hash_verified=true
+#       等长的错内容 → complete 409 hash_mismatch，资产 pending，该 sha256 秒传不再命中
+go test -count=1 ./internal/handler/ ./internal/objects/   # 两种对象模式各覆盖一遍
+```
 
 ## 运行
 

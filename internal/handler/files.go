@@ -138,8 +138,6 @@ func (h *Handler) download(c *gin.Context) {
 	_ = size
 }
 
-// verifyHash 两种用法：只给 sha256 是秒传探测（返回是否已存在），
-// 给 asset_id 则读回对象重算摘要，与声明的 sha256 比对并记录校验结果。
 // contentDisposition 生成下载响应头。文件名是上传者提供的任意字符串，
 // 直接拼进 header 会让名字里的引号改写 disposition 的其它参数（非 ASCII 名
 // 也是一串裸字节）；交给 mime.FormatMediaType 编码，必要时走 RFC 2231 的
@@ -154,6 +152,13 @@ func contentDisposition(name string) string {
 	return "attachment"
 }
 
+// verifyHash 两种用法：只给 sha256 是秒传探测（返回是否已存在），
+// 给 asset_id 则读回对象重算摘要，与声明的 sha256 比对。
+//
+// 探测（sha 分支）允许匿名：它只回答"库里有没有这份内容"，判定与 initiate 同一口径
+// （hash_verified=true），未验证的命中按不存在返回。
+// 按 asset_id 校验必须登录：它要整份回读对象（成本随对象大小增长，且受同一套上限约束）
+// 并写回校验结论，是"上传者/审核者维护自己资产"的动作，不是公开只读接口。
 func (h *Handler) verifyHash(c *gin.Context) {
 	var in struct {
 		AssetID    string `json:"asset_id"`
@@ -169,7 +174,9 @@ func (h *Handler) verifyHash(c *gin.Context) {
 			fail(c, 400, "invalid_payload")
 			return
 		}
-		asset, err := h.db.AssetByHash(ctx, sha)
+		// 秒传探测与 initiate 同一条判据：只有服务端验过内容的资产才算"已有这份内容"。
+		// 未验证的命中按不存在返回，客户端会走正常上传，不会白等一份错内容。
+		asset, err := h.db.VerifiedAssetByHash(ctx, sha)
 		if err != nil || !h.readable(c, asset) {
 			// 无权读取的内容一律当作不存在。
 			c.JSON(200, gin.H{"exists": false})
@@ -182,8 +189,14 @@ func (h *Handler) verifyHash(c *gin.Context) {
 		fail(c, 400, "invalid_payload")
 		return
 	}
+	// 字面量非法即格式错误，先于鉴权回 404（与其余按 id 查库的入口一致，
+	// 也保住契约里"非法 id 不得被兜成 500"的口径）；合法 id 才要求登录。
 	if !validID(in.AssetID) {
 		fail(c, 404, "not_found")
+		return
+	}
+	if auth.Current(c) == nil {
+		fail(c, 401, "unauthorized")
 		return
 	}
 	asset, err := h.db.Asset(ctx, in.AssetID)
@@ -199,13 +212,24 @@ func (h *Handler) verifyHash(c *gin.Context) {
 		fail(c, 404, "not_found")
 		return
 	}
-	digest, size, err := h.objects.HashOf(ctx, asset.ObjectKey)
-	if err != nil {
-		fail(c, 503, "storage_unavailable")
+	digest, size, verr := h.objects.VerifyHash(ctx, asset.ObjectKey, "")
+	if verr != nil {
+		// 与 complete 同一套上限：超限/超时都是显式失败，不返回半份摘要。
+		code, status := verifyError(verr)
+		fail(c, status, code)
 		return
 	}
 	verified := digest == asset.SHA256
-	_ = h.db.MarkHashVerified(ctx, asset.ID, verified, size)
+	if !verified {
+		// 回读发现键上的内容与声明不符：只把**尚未发布**的资产钉在失败态（不参与秒传），
+		// 已经 complete 的资产不在这里降级——降级属于"内容坏了"的处置决定，
+		// 不该由一个匿名可触发的接口顺手改掉线上可读资产的状态，只留日志供审计跟进。
+		if asset.Status != "complete" {
+			_ = h.db.MarkHashMismatch(ctx, asset.ID, "hash_mismatch")
+		}
+		h.log.Printf("storage: asset %s 回读摘要与声明不符 declared=%s actual=%s status=%s",
+			asset.ID, asset.SHA256, digest, asset.Status)
+	}
 	c.JSON(200, gin.H{
 		"asset_id":        asset.ID,
 		"sha256":          digest,
