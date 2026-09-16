@@ -18,11 +18,16 @@ package auth
 const (
 	// PermissionAssetUpload 上传资源：创建自己的资产、完成直传、绑定用途。
 	//
-	// 尚未在端点上收口：/api/storage 的写接口仍是「登录即可创建自己的资源」，
-	// 与拆分前一致（旧代码只对「处置他人资产」做过角色判断）。
-	// 原因是本服务不能默认拒绝存量成员——账号服务播种的系统组里只有 admin 带 `*`，
-	// 成员组没有任何 storage.* 码；此刻按码收口会让未配置权限组的实例只能由管理员上传。
-	// 实例确需限制上传时，再把写接口按本码收口（一处 Can 调用），届时同步 README 与文档。
+	// 收口点：POST /upload/initiate、POST /upload/complete、PUT /upload/stream/:assetId、
+	// POST /bind（handler 的 requireUpload 中间件）；缺码 403 forbidden，未登录 401。
+	// 解绑、读接口与 /stats 不收此码：前者按上传者判定所有权，后者走 moderate 或匿名可见性。
+	//
+	// 与 moderate 的分工：本码是「创建并登记自己的东西」，moderate 是「处置他人的东西」
+	// （续传/覆盖他人未完成上传、完成/绑定他人资产、读全局统计）。两者互不蕴含。
+	//
+	// 为什么可以收口：账号服务把本码播进 member 组（任何登录用户默认持有）并对存量实例做
+	// 只增不改的回填，因此两侧同批上线后成员照常上传；实例要收紧时从 member 组移除该码即可，
+	// 老令牌（无 permissions 声明）仍按历史角色兜底，不会因为升级突然失去上传能力。
 	PermissionAssetUpload = "storage.asset.upload"
 
 	// PermissionAssetModerate 审核资源：处置他人的资产（完成合并、流式接收、绑定、

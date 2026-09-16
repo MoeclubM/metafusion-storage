@@ -42,15 +42,17 @@ func New(db *store.Store, objs *objects.Store, cat *catalog.Client, verifier *au
 	return &Handler{db: db, objects: objs, catalog: cat, verifier: verifier, cfg: cfg, log: log.Default()}
 }
 
-// Register 挂载契约路由。读接口允许匿名（可见性由目录实体决定），写接口一律要求登录。
+// Register 挂载契约路由。读接口允许匿名（可见性由目录实体决定）；
+// 创建/登记自己的资产要 storage.asset.upload，其余写接口只要求登录（见 requireUpload）。
 func (h *Handler) Register(r *gin.Engine) {
 	v := h.verifier
 	api := r.Group("/api/storage")
 	{
-		api.POST("/upload/initiate", v.Required(), h.initiateUpload)
-		api.POST("/upload/complete", v.Required(), h.completeUpload)
-		api.PUT("/upload/stream/:assetId", v.Required(), h.streamUpload)
-		api.POST("/bind", v.Required(), h.bind)
+		api.POST("/upload/initiate", v.Required(), h.requireUpload(), h.initiateUpload)
+		api.POST("/upload/complete", v.Required(), h.requireUpload(), h.completeUpload)
+		api.PUT("/upload/stream/:assetId", v.Required(), h.requireUpload(), h.streamUpload)
+		api.POST("/bind", v.Required(), h.requireUpload(), h.bind)
+		// 解绑只能删自己的绑定（handler 内按上传者判定），不需要额外权限码。
 		api.DELETE("/bindings/:id", v.Required(), h.unbind)
 		api.POST("/verify-hash", v.Middleware(), h.verifyHash)
 		api.GET("/assets/:id", v.Middleware(), h.getAsset)
@@ -63,6 +65,25 @@ func (h *Handler) Register(r *gin.Engine) {
 
 func fail(c *gin.Context, status int, code string) {
 	c.JSON(status, gin.H{"error": code})
+}
+
+// requireUpload 要求登录且持有 storage.asset.upload：上传（创建自己的资产、完成直传）
+// 与绑定用途属于"创建与登记自己的东西"，与 storage.asset.moderate（处置他人资产）分开收口。
+//
+// 为什么现在才收口：本服务此前是"登录即可上传"，因为账号服务播种的系统组里没有任何 storage.* 码，
+// 直接按码收口会让存量实例只剩管理员能上传。本批次账号侧已把该码播进 member 组并回填存量实例，
+// 两侧同批上线后收口不改变既有行为（成员照常上传），管理员之后可以按需移除该码来收紧。
+//
+// 401 由 v.Required() 先给出（未登录），这里只把"已登录但缺码"判成 403 forbidden。
+func (h *Handler) requireUpload() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if p := auth.Current(c); p == nil || !p.Can(auth.PermissionAssetUpload) {
+			fail(c, http.StatusForbidden, "forbidden")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 // validID 报告路径或载荷里的 id 是否是合法 uuid。存储侧的所有 id 都是 uuid 主键，

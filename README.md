@@ -17,10 +17,10 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| POST | `/upload/initiate` | 登录 | 直传第一步：命中 sha256 即秒传；否则签发预签名地址（分片则返回 upload_id 与每片地址）。同一 sha256 的未完成上传由上传者本人续传 |
-| POST | `/upload/complete` | 上传者/审核者 | 分片合并后**服务端回读对象重算 sha256**，与声明一致才置 complete 并记 `hash_verified`；不一致返回 `hash_mismatch`（409），超限/超时返回 `hash_verify_too_large`（413）/`verify_timeout`（408） |
-| PUT | `/upload/stream/{asset_id}` | 上传者/审核者 | 服务端流式接收（本地对象模式的主要上传方式，也可作为预签名不可用时的兜底）；落盘前流式计算 sha256 与声明比对 |
-| POST | `/bind` | 上传者/审核者 | 绑定到目录实体，带 `binding_role` 用途 |
+| POST | `/upload/initiate` | 登录 + `upload` | 直传第一步：命中 sha256 即秒传；否则签发预签名地址（分片则返回 upload_id 与每片地址）。同一 sha256 的未完成上传由上传者本人续传 |
+| POST | `/upload/complete` | 登录 + `upload`；资产属他人时另需审核者 | 分片合并后**服务端回读对象重算 sha256**，与声明一致才置 complete 并记 `hash_verified`；不一致返回 `hash_mismatch`（409），超限/超时返回 `hash_verify_too_large`（413）/`verify_timeout`（408） |
+| PUT | `/upload/stream/{asset_id}` | 登录 + `upload`；资产属他人时另需审核者 | 服务端流式接收（本地对象模式的主要上传方式，也可作为预签名不可用时的兜底）；落盘前流式计算 sha256 与声明比对 |
+| POST | `/bind` | 登录 + `upload`；资产属他人时另需审核者 | 绑定到目录实体，带 `binding_role` 用途 |
 | DELETE | `/bindings/{id}` | 绑定创建者/上传者/审核者 | 解绑纠错 |
 | GET | `/assets/{id}` | 可读 | 文件元数据 + 绑定列表 |
 | GET | `/assets/{id}/content` | 可读 | **原样**内联分发对象内容（不转码）：给目录数据里需要长期引用、能被 `<img>` 直接加载的地址用；`download` 在对象存储模式下只回预签名地址（会过期、Host 是对象存储端点），不能当稳定地址 |
@@ -42,7 +42,7 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 
 | 码 | 含义 | 当前覆盖 |
 | --- | --- | --- |
-| `storage.asset.upload` | 上传资源 | 已在账号服务的清单里，本服务**尚未**在写接口上收口（写接口仍是「登录即可创建自己的资源」，与拆分前一致） |
+| `storage.asset.upload` | 上传资源：创建自己的资产、完成直传、绑定用途 | 路由表中的 `upload/initiate`、`upload/complete`、`upload/stream`、`bind` 四个写接口（缺码 `403 forbidden`）；登录本身仍由 401 判定。`unbind`、读接口与 `/stats` 不收此码 |
 | `storage.asset.moderate` | 审核资源：完成/接收/绑定/解绑/读取他人的资产、全局统计 | 读表里所有标「审核者」的位置 |
 
 代码里的判定不做角色比较：给某个组授予 `storage.asset.moderate` 即可让成员承担审核（例如建一个
