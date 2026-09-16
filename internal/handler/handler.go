@@ -367,13 +367,15 @@ func (h *Handler) streamUpload(c *gin.Context) {
 	if h.cfg.MaxUploadMB > 0 {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64(h.cfg.MaxUploadMB)<<20)
 	}
-	size, digest, err := h.objects.PutStream(ctx, asset.ObjectKey, c.Request.Body)
-	if err != nil {
-		fail(c, 400, "upload_failed")
+	// PutStream 在发布对象之前就比对声明摘要：不符时对象根本没进对象存储，
+	// 因此这里只把 ErrHashMismatch 翻成 409，不需要再补一次"读完才比对"的清理。
+	size, _, err := h.objects.PutStream(ctx, asset.ObjectKey, c.Request.Body, asset.SHA256)
+	if errors.Is(err, objects.ErrHashMismatch) {
+		fail(c, 409, "hash_mismatch")
 		return
 	}
-	if digest != asset.SHA256 {
-		fail(c, 409, "hash_mismatch")
+	if err != nil {
+		fail(c, 400, "upload_failed")
 		return
 	}
 	if err := h.db.MarkHashVerified(ctx, asset.ID, true, size); err != nil {

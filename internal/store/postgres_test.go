@@ -51,7 +51,7 @@ func TestAssetLifecycleAndLocalObjects(t *testing.T) {
 	sum := sha256.Sum256([]byte(content))
 	digest := hex.EncodeToString(sum[:])
 	key := objs.KeyFor(digest, "track.flac")
-	size, got, err := objs.PutStream(ctx, key, strings.NewReader(content))
+	size, got, err := objs.PutStream(ctx, key, strings.NewReader(content), digest)
 	if err != nil {
 		t.Fatalf("put stream: %v", err)
 	}

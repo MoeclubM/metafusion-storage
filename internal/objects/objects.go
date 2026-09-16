@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -218,9 +219,16 @@ func mimeDisposition(name string) string {
 	return "attachment; filename=\"" + sanitizeName(name) + "\""
 }
 
-// PutStream 把请求体流式写入对象存储并同时计算 sha256：不把整份文件读进内存，
-// 返回实际字节数与十六进制摘要，供调用方与声明哈希比对（服务端校验路径）。
-func (s *Store) PutStream(ctx context.Context, key string, r io.Reader) (int64, string, error) {
+// ErrHashMismatch 表示请求体的实际 sha256 与调用方声明的值不符。
+//
+// 校验发生在**发布对象之前**（临时文件阶段），因此内容寻址键上永远不会留下
+// "键是 X、内容是 Y" 的对象：声明不符时对象根本不进对象存储，临时文件随 defer 删除。
+// 这一点是内容寻址的前提——先发布再比对，比对失败后对象已经躺在键 X 上了。
+var ErrHashMismatch = errors.New("hash_mismatch")
+
+// PutStream 把请求体流式写入对象存储并同时计算 sha256：不把整份文件读进内存。
+// expectedSha256 非空时必须与实际摘要一致，否则返回 ErrHashMismatch 且不写入对象。
+func (s *Store) PutStream(ctx context.Context, key string, r io.Reader, expectedSha256 string) (int64, string, error) {
 	tmp, err := os.CreateTemp(s.root, "incoming-")
 	if err != nil {
 		return 0, "", err
@@ -237,6 +245,9 @@ func (s *Store) PutStream(ctx context.Context, key string, r io.Reader) (int64, 
 		return 0, "", closeErr
 	}
 	digest := hex.EncodeToString(hash.Sum(nil))
+	if expectedSha256 != "" && digest != expectedSha256 {
+		return size, digest, ErrHashMismatch
+	}
 	if s.local {
 		dest := filepath.Join(s.root, filepath.FromSlash(key))
 		if err = os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -318,7 +319,7 @@ func TestMultipartPresignedUploadAgainstFakeS3(t *testing.T) {
 
 // 单次 PUT 上传（part_count=1）与服务端中转（PutStream）在 S3 模式下同样要能落库。
 func TestSinglePartAndServerSideUploadAgainstFakeS3(t *testing.T) {
-	srv, _ := newFakeS3(t)
+	srv, fake := newFakeS3(t)
 	s := newStoreAgainst(t, strings.TrimPrefix(srv.URL, "http://"))
 	ctx := context.Background()
 
@@ -341,7 +342,7 @@ func TestSinglePartAndServerSideUploadAgainstFakeS3(t *testing.T) {
 
 	// 服务端中转路径（本地模式的主要上传方式，在 S3 模式下是兜底）。
 	key2 := s.KeyFor(sha256Hex([]byte("server-side")), "scan.png")
-	written, digest, err := s.PutStream(ctx, key2, strings.NewReader("server-side"))
+	written, digest, err := s.PutStream(ctx, key2, strings.NewReader("server-side"), sha256Hex([]byte("server-side")))
 	if err != nil || written != int64(len("server-side")) {
 		t.Fatalf("PutStream: size=%d err=%v", written, err)
 	}
@@ -351,5 +352,19 @@ func TestSinglePartAndServerSideUploadAgainstFakeS3(t *testing.T) {
 	readBack, _, err := s.HashOf(ctx, key2)
 	if err != nil || readBack != digest {
 		t.Fatalf("PutStream 后回读不符: %s err=%v", readBack, err)
+	}
+
+	// 声明摘要不符：对象存储里不得出现该键——先发布再比对会把"键 X 上躺着 Y"
+	// 的污染对象留在内容寻址键上，后续同一 sha256 的秒传就会拿到错误内容。
+	claimed := sha256Hex([]byte("claimed-body"))
+	key3 := s.KeyFor(claimed, "poison.png")
+	if _, _, err = s.PutStream(ctx, key3, strings.NewReader("actual-body"), claimed); !errors.Is(err, ErrHashMismatch) {
+		t.Fatalf("摘要不符应返回 ErrHashMismatch，实际 %v", err)
+	}
+	fake.mu.Lock()
+	_, leaked := fake.objects[key3]
+	fake.mu.Unlock()
+	if leaked {
+		t.Fatal("摘要不符的请求体不得被发布到内容寻址键")
 	}
 }
