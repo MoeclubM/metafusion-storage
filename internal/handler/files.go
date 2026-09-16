@@ -269,7 +269,9 @@ func (h *Handler) verifyHash(c *gin.Context) {
 		return
 	}
 	if auth.Current(c) == nil {
-		fail(c, 401, "unauthorized")
+		// 错误码与鉴权中间件（internal/auth 的 Middleware）同口径：客户端按码分支，
+		// 同一语义出现两个码会让前端只认其中一个。
+		fail(c, 401, "authentication_required")
 		return
 	}
 	asset, err := h.db.Asset(ctx, in.AssetID)

@@ -487,8 +487,11 @@ func TestVerifyHashByAssetRequiresLogin(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]any{"asset_id": assetID})
+	// 401 的错误码要与鉴权中间件同口径：客户端按码分支，同一语义不能出现两个码。
 	if code, resp := h.do("", http.MethodPost, "/api/storage/verify-hash", string(body)); code != 401 {
 		t.Fatalf("匿名按 asset_id 校验应 401，实际 %d（%s）", code, resp)
+	} else if !strings.Contains(resp, `"error":"authentication_required"`) {
+		t.Fatalf("匿名 401 的错误码应为 authentication_required，实际 %s", resp)
 	}
 	code, resp := h.do(token, http.MethodPost, "/api/storage/verify-hash", string(body))
 	if code != 200 || !strings.Contains(resp, `"verified":true`) {
