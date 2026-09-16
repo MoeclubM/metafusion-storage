@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：只有 checkout 需要读权限
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go (build / vet / test)
+    runs-on: ubuntu-latest
+    # store 的回归用例需要真实 PostgreSQL（未设置 STORAGE_TEST_DSN 时它们自己 t.Skip）。
+    # 这里起临时库把回归也跑起来，等价于本地：
+    #   STORAGE_TEST_DSN='postgres://postgres:****@127.0.0.1:5432/metafusion_storage_test?sslmode=disable' go test ./...
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: metafusion_storage_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # 库名必须含 _test：testutil.DSN 会拒绝非独立测试库
+      # testutil 只校验 DSN 非空且库名含 _test；lib/pq 默认要 TLS，故显式 sslmode=disable
+      STORAGE_TEST_DSN: postgres://postgres:test-only-password@127.0.0.1:5432/metafusion_storage_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"   # 与 go.mod 的 go 指令一致
+          cache: true
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
