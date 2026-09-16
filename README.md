@@ -10,7 +10,7 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 - **依赖**：元数据目录服务（实体可见性判定）、账号服务（令牌验签，迁移期可用目录服务兜底）。
 
 存储侧与目录侧的接口只有一条：`GET /api/catalog/entities/{id}`（可见性与 kind）；实体已合并时再取一次
-`/api/catalog/entities/{id}/resolve` 跟随重定向（合并只广播事件，改引用是引用方自己的事）。
+`/api/catalog/entities/{id}/resolve` 跟随重定向（目录侧把合并事实写进 `catalog.outbox`，**当前没有跨服务消费者**，改引用是引用方自己的事；见主仓库审计文档 §5）。
 身份解析不走目录服务：存量不透明令牌的兜底问 `AUTH_URL`（账号服务）。
 
 ## HTTP 契约（`/api/storage`）
@@ -155,6 +155,6 @@ STORAGE_TEST_DSN='postgres://…/metafusion_storage_test' go test ./...   # 追�
 
 ## 迁移状态
 
-- 主仓库的 `/api/archive/*`、`/api/playback/*`、`/api/media/*` 仍在服务线上流量；
-  本服务的 `/api/storage/*` 是目标契约，**切流由网关按前缀切换**，切换前不影响线上。
+- 主仓库的 `/api/archive/*`、`/api/playback/*`、`/api/media/*` **已退役**（网关不再为它们单列 location，相关实现与表已删除）；
+  本服务的 `/api/storage/*` 是唯一契约，切流已完成，回退按网关前缀切换。
 - 异步转码/HLS/雪碧图投递、BT 种子与磁力链、分片续传的断点记录尚未实现（契约预留）。
