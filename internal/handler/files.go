@@ -44,6 +44,10 @@ func (h *Handler) readable(c *gin.Context, asset store.Asset) bool {
 }
 
 func (h *Handler) getAsset(c *gin.Context) {
+	if !validID(c.Param("id")) {
+		fail(c, 404, "not_found")
+		return
+	}
 	ctx := c.Request.Context()
 	asset, err := h.db.Asset(ctx, c.Param("id"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -84,6 +88,10 @@ func (h *Handler) listEntityFiles(c *gin.Context) {
 }
 
 func (h *Handler) download(c *gin.Context) {
+	if !validID(c.Param("assetId")) {
+		fail(c, 404, "not_found")
+		return
+	}
 	ctx := c.Request.Context()
 	asset, err := h.db.Asset(ctx, c.Param("assetId"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -157,6 +165,10 @@ func (h *Handler) verifyHash(c *gin.Context) {
 	}
 	if in.AssetID == "" {
 		fail(c, 400, "invalid_payload")
+		return
+	}
+	if !validID(in.AssetID) {
+		fail(c, 404, "not_found")
 		return
 	}
 	asset, err := h.db.Asset(ctx, in.AssetID)

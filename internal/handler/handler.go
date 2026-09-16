@@ -64,6 +64,14 @@ func fail(c *gin.Context, status int, code string) {
 	c.JSON(status, gin.H{"error": code})
 }
 
+// validID 报告路径或载荷里的 id 是否是合法 uuid。存储侧的所有 id 都是 uuid 主键，
+// 非法字面量必须按"不存在"处理：直接送进 uuid 列只会拿到 pq 的解析错误，
+// 再被兜成 500 module_error（契约里没有这个状态码，线上可复现）。
+func validID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil
+}
+
 func (h *Handler) credentials(c *gin.Context) (string, string) {
 	bearer := ""
 	if authz := strings.TrimSpace(c.GetHeader("Authorization")); len(authz) > 7 && strings.EqualFold(authz[:7], "bearer ") {
@@ -299,6 +307,10 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		fail(c, 400, "invalid_payload")
 		return
 	}
+	if !validID(in.AssetID) {
+		fail(c, 404, "not_found")
+		return
+	}
 	p := auth.Current(c)
 	ctx := c.Request.Context()
 	asset, err := h.db.Asset(ctx, in.AssetID)
@@ -349,6 +361,10 @@ func (h *Handler) completeUpload(c *gin.Context) {
 // streamUpload 是服务端接收路径：本地对象模式的主要上传方式，
 // 同时也可作为预签名不可用时的兜底。落盘前流式计算 sha256 并与声明比对。
 func (h *Handler) streamUpload(c *gin.Context) {
+	if !validID(c.Param("assetId")) {
+		fail(c, 404, "not_found")
+		return
+	}
 	p := auth.Current(c)
 	ctx := c.Request.Context()
 	asset, err := h.db.Asset(ctx, c.Param("assetId"))
@@ -441,6 +457,10 @@ func (h *Handler) bind(c *gin.Context) {
 }
 
 func (h *Handler) unbind(c *gin.Context) {
+	if !validID(c.Param("id")) {
+		fail(c, 404, "not_found")
+		return
+	}
 	p := auth.Current(c)
 	ctx := c.Request.Context()
 	b, err := h.db.Binding(ctx, c.Param("id"))

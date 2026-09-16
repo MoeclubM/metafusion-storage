@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +219,24 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/storage/entities/not-a-uuid/files", nil))
 	if w.Code != 404 {
 		t.Fatalf("非法实体 id 应 404，实际 %d", w.Code)
+	}
+
+	// 其余按 uuid 查库的入口同理：非法字面量必须回 404，而不是把 pq 的
+	// uuid 解析错误兜成 500（线上可直接复现这个 500）。
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/storage/assets/not-a-uuid", ""},
+		{http.MethodGet, "/api/storage/download/not-a-uuid", ""},
+		{http.MethodPost, "/api/storage/verify-hash", "{\"asset_id\":\"not-a-uuid\"}"},
+	} {
+		w = httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		r.ServeHTTP(w, req)
+		if w.Code != 404 {
+			t.Fatalf("%s %s 非法 id 应 404，实际 %d（%s）", tc.method, tc.path, w.Code, w.Body.String())
+		}
 	}
 }
 
