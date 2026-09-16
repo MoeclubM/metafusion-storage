@@ -19,43 +19,8 @@ var ErrNotFound = errors.New("not_found")
 // 通过（VerifyHash）或流式上传边收边算（PutStream）产生，没有第三条路。
 var ErrAssetUnverified = errors.New("asset_unverified")
 
-// schema 是存储服务自有的 storage schema。服务只读写自己的表，
-// 不 JOIN 目录库；实体可见性一律通过 catalog 的 HTTP 契约询问。
-// 版本化迁移待补：当前用幂等 DDL 建表，与主仓库 modules 包的做法一致。
-const schema = `CREATE SCHEMA IF NOT EXISTS storage;
-CREATE TABLE IF NOT EXISTS storage.assets(
-  id uuid PRIMARY KEY,
-  sha256 text NOT NULL DEFAULT '',
-  size_bytes bigint NOT NULL DEFAULT 0,
-  declared_size bigint NOT NULL DEFAULT 0,
-  mime_type text NOT NULL DEFAULT 'application/octet-stream',
-  file_name text NOT NULL,
-  object_key text NOT NULL,
-  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','complete')),
-  multipart_upload_id text NOT NULL DEFAULT '',
-  hash_verified boolean NOT NULL DEFAULT false,
-  -- fail_reason 记下服务端回读校验的失败原因（hash_mismatch / verify_timeout /
-  -- hash_verify_too_large）：这些资产会一直留在 pending，不落原因就只剩"没完成"可查。
-  fail_reason text NOT NULL DEFAULT '',
-  uploader_id uuid NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz
-);
--- 内容寻址：同名内容只登记一次。pending 行的 sha256 先占位，重复提交即续传。
-CREATE UNIQUE INDEX IF NOT EXISTS assets_sha256 ON storage.assets(sha256) WHERE sha256 <> '';
-CREATE TABLE IF NOT EXISTS storage.bindings(
-  id uuid PRIMARY KEY,
-  asset_id uuid NOT NULL REFERENCES storage.assets(id) ON DELETE CASCADE,
-  target_entity_id uuid NOT NULL,
-  target_kind text NOT NULL DEFAULT '',
-  binding_role text NOT NULL DEFAULT 'master_archive',
-  created_by uuid NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE(asset_id,target_entity_id,binding_role)
-);
-CREATE INDEX IF NOT EXISTS bindings_entity ON storage.bindings(target_entity_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS bindings_asset ON storage.bindings(asset_id);
-`
+// 表结构在 migrations/ 下（000001_init.up.sql），由 Init → Migrate 在启动时应用：
+// 不再内联 DDL，避免结构与迁移文件各存一份、改一处漏一处。
 
 // Asset 是一份物理文件的内容寻址记录：身份是 sha256，不含任何目录语义。
 type Asset struct {
@@ -114,19 +79,14 @@ func (s *Store) Close() error { return s.db.Close() }
 // DB 暴露底层连接，供健康检查使用。
 func (s *Store) DB() *sql.DB { return s.db }
 
+// Init 应用尚未记账的迁移（DDL 见 migrations/，账本 storage.schema_migrations）。
+// 保持"启动即可用"的既有行为：迁移文件本身幂等，老实例重复启动不会改结构。
 func (s *Store) Init(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, alterSchema)
+	_, err := s.Migrate(ctx)
 	return err
 }
 
 const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,fail_reason,uploader_id,created_at,completed_at"
-
-// alterSchema 补建已存在实例缺的列：CREATE TABLE IF NOT EXISTS 对既有表是空操作，
-// 新增列必须单独写一条幂等 DDL，否则升级后的实例连查询都会因缺列直接失败。
-const alterSchema = "ALTER TABLE storage.assets ADD COLUMN IF NOT EXISTS fail_reason text NOT NULL DEFAULT '';"
 
 func scanAsset(row interface{ Scan(...any) error }) (Asset, error) {
 	var a Asset

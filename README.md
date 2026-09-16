@@ -123,6 +123,23 @@ go test ./... && go vet ./...
 未配置 `STORAGE_S3_ENDPOINT` 时走本地对象模式：`initiate` 返回 `direct_upload_url`，
 客户端 `PUT` 原始字节到该地址即完成入库，服务端边收边算 sha256。
 
+## 数据库结构与迁移
+
+表结构在 `internal/store/migrations/*.up.sql`（当前只有基线 `000001_init.up.sql`），
+由 `internal/store` 在启动时应用（`Init` → `Migrate`）；每个版本一个事务，
+DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, applied_at)`。
+
+- 迁移文件用 `go:embed` 打进二进制：镜像里只有 `/app/storage-server`，文件必须随二进制走；
+- 每条语句都幂等（`IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`）：老实例重复启动不改结构，
+  历史实例缺列（例如后补的 `fail_reason`）也由同一份文件补齐，不再另写"补丁迁移"；
+- 迁移期间取事务级 advisory lock（键 740204，与目录服务的 740202、账号服务的 740203 分开）：
+  多副本同时启动时只让一个实例执行 DDL，其余实例等它提交后按账本空转；
+- 账本只记"这一版执行过"，不校验结构本身。手工删过表而账本还在时启动不会重建，
+  这种情况删掉对应账本行（`DELETE FROM storage.schema_migrations WHERE version='000001_init'`）再重启。
+
+`sql/roles.example.sql` 是数据层隔离（B4）的准备件：给 `metafusion_storage` 角色**只授 `storage` schema**，
+**编排尚未启用**；手工执行该文件并把 `DATABASE_URL` 换成该角色即生效，代码侧不需要改动。
+
 ## 测试
 
 ```bash
@@ -141,4 +158,3 @@ STORAGE_TEST_DSN='postgres://…/metafusion_storage_test' go test ./...   # 追�
 - 主仓库的 `/api/archive/*`、`/api/playback/*`、`/api/media/*` 仍在服务线上流量；
   本服务的 `/api/storage/*` 是目标契约，**切流由网关按前缀切换**，切换前不影响线上。
 - 异步转码/HLS/雪碧图投递、BT 种子与磁力链、分片续传的断点记录尚未实现（契约预留）。
-- 版本化迁移待补：当前与主仓库 modules 包一致，用幂等 DDL 建表。

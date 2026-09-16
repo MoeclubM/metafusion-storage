@@ -152,3 +152,42 @@ func TestAssetLifecycleAndLocalObjects(t *testing.T) {
 		t.Fatalf("统计不符: assets=%d bytes=%d err=%v", assets, bytes, err)
 	}
 }
+
+// TestMigrateRecordsVersionAndSkipsApplied：版本账本记录了基线，重复初始化必须空转。
+// 结构断言用 count(*) 而不是 information_schema：这里要证的是"表可查"，
+// 列形状由本包的查询与用例自身守着（改了列名，别的用例会先失败）。
+func TestMigrateRecordsVersionAndSkipsApplied(t *testing.T) {
+	dsn := testutil.DSN(t)
+	db := testutil.Database(t)
+	ctx := context.Background()
+
+	s, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if err = s.Init(ctx); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	// 第二次初始化：账本里已有 000001_init，必须空转（不返回本次应用的版本，也不再执行 DDL）。
+	applied, err := s.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("重复初始化不应再应用迁移，实际 %v", applied)
+	}
+	var recorded int
+	if err = db.QueryRowContext(ctx, "SELECT count(*) FROM storage.schema_migrations WHERE version='000001_init'").Scan(&recorded); err != nil {
+		t.Fatalf("查账本: %v", err)
+	}
+	if recorded != 1 {
+		t.Fatalf("账本应恰好记录一次 000001_init，实际 %d", recorded)
+	}
+	for _, table := range []string{"storage.assets", "storage.bindings"} {
+		var n int
+		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil {
+			t.Fatalf("%s 不可查（迁移没建表）: %v", table, err)
+		}
+	}
+}
