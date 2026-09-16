@@ -21,9 +21,11 @@ services:
       - STORAGE_S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-}
       - STORAGE_S3_BUCKET=${STORAGE_S3_BUCKET:-metafusion-master}
       - STORAGE_S3_TLS=${STORAGE_S3_TLS:-false}
-      # 账号服务上线前指向目录服务的 JWKS，上线后只改这一个变量。
-      - STORAGE_JWKS_URL=${STORAGE_JWKS_URL:-http://catalog:8080/api/oidc/jwks}
-      - CATALOG_URL=${CATALOG_URL:-http://catalog:8080}
+      # 账号服务是唯一签发方：JWKS 与不透明会话令牌的兜底都问它（与主工程编排一致）。
+      - STORAGE_JWKS_URL=${STORAGE_JWKS_URL:-http://auth:8081/api/oidc/jwks}
+      - AUTH_URL=${AUTH_URL:-http://auth:8081}
+      # 目录服务在主工程编排里叫 backend（没有叫 catalog 的服务）。
+      - CATALOG_URL=${CATALOG_URL:-http://backend:8080}
       - AUTH_JWT_ISSUER=${AUTH_JWT_ISSUER:-https://findverse.cc/api}
       - AUTH_JWT_AUDIENCE=${AUTH_JWT_AUDIENCE:-metafusion}
     volumes:
