@@ -110,7 +110,9 @@ func (s *Store) KeyFor(sha256hex, name string) string {
 
 func sanitizeName(name string) string {
 	base := filepath.Base(strings.TrimSpace(name))
-	if base == "" || base == "." || base == "/" || base == "\\" {
+	// ".." 会被 filepath.Base 原样返回，点号又在允许字符集内：不拦住它，
+	// 对象键就会多出一层父目录引用（<sha>/..），本地模式落盘时变成对着目录 rename 而失败。
+	if base == "" || base == "." || base == ".." || base == "/" || base == "\\" {
 		return "blob"
 	}
 	out := make([]rune, 0, len(base))

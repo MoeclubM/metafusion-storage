@@ -26,6 +26,8 @@ func TestSanitizeNameStripsUnsafeCharacters(t *testing.T) {
 		"a/b/c.flac":       "c.flac",
 		"quo\"te.bin":      "quo_te.bin",
 		"":                 "blob",
+		"..":               "blob",
+		"a/..":             "blob",
 		"日本語.flac":         "___.flac",
 	}
 	for in, want := range cases {
