@@ -1,5 +1,5 @@
 // Package handler 暴露存储服务的 HTTP 契约：/api/storage/*。
-// 契约以 docs-site/docs/api-storage.md 的设计为准（内容寻址 + 预签名直传 + 绑定用途），
+// 契约以 metafusion-docs 的 docs/api-storage.md 为准（内容寻址 + 预签名直传 + 绑定用途），
 // 绑定只描述"文件是谁的什么用途"，收录位置仍留在目录侧的 locator。
 package handler
 

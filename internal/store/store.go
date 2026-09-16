@@ -140,7 +140,8 @@ func (s *Store) SetUploadSession(ctx context.Context, id, uploadID string) error
 	return err
 }
 
-// CompleteAsset 落定文件大小与完成状态；declaredSize 为 0 时不覆盖（本地对象模式回填）。
+// CompleteAsset 落定文件大小与完成状态；size 一律覆盖——两条上传路径都在落定前
+// 算过真实字节数（直传按 HEAD 回读、流式按写入计数），不存在"为 0 就不覆盖"的分支。
 func (s *Store) CompleteAsset(ctx context.Context, id string, size int64) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET status='complete', size_bytes=$2, completed_at=now() WHERE id=$1", id, size)
 	return err

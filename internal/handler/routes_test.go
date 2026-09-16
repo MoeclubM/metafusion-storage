@@ -13,7 +13,7 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/store"
 )
 
-// frozenRoutes 是存储服务的对外契约（见 docs-site/docs/api-storage.md）：
+// frozenRoutes 是存储服务的对外契约（见 metafusion-docs 的 docs/api-storage.md）：
 // 内容寻址直传 + 绑定用途 + 统一下载入口。改动路由会在这里失败。
 var frozenRoutes = []string{
 	"DELETE /api/storage/bindings/:id",
