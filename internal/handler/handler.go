@@ -54,6 +54,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.DELETE("/bindings/:id", v.Required(), h.unbind)
 		api.POST("/verify-hash", v.Middleware(), h.verifyHash)
 		api.GET("/assets/:id", v.Middleware(), h.getAsset)
+		api.GET("/assets/:id/content", v.Middleware(), h.assetContent)
 		api.GET("/entities/:id/files", v.Middleware(), h.listEntityFiles)
 		api.GET("/download/:assetId", v.Middleware(), h.download)
 		api.GET("/stats", v.Required(), h.stats)

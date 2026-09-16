@@ -18,6 +18,7 @@ import (
 var frozenRoutes = []string{
 	"DELETE /api/storage/bindings/:id",
 	"GET /api/storage/assets/:id",
+	"GET /api/storage/assets/:id/content",
 	"GET /api/storage/download/:assetId",
 	"GET /api/storage/entities/:id/files",
 	"GET /api/storage/stats",

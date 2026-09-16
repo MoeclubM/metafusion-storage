@@ -2,8 +2,11 @@ package handler
 
 import (
 	"errors"
+	"io"
 	"mime"
 	"net/http"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +19,10 @@ import (
 // maxBindingProbe 限制一次读取鉴权最多问目录服务几次：绑定是"文件属于谁"的少量元数据，
 // 异常多的绑定不值得为一次下载打穿目录服务。
 const maxBindingProbe = 20
+
+// contentCacheSeconds 是内联分发的浏览器缓存时长。可见性按**请求**判定（绑定目标是否可见），
+// 因此响应只能进私有缓存：共享缓存会把一次成功鉴权的响应复用给无权者。
+const contentCacheSeconds = 300
 
 // readable 是文件读取的唯一判定：上传者本人或持 storage.asset.moderate 的审核者直通，
 // 其余人只要**任一**绑定目标可见即可读（直通档位同 canManageAsset，替换拆分前的 role == admin）。
@@ -69,6 +76,72 @@ func (h *Handler) getAsset(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"asset": asset, "bindings": bindings})
+}
+
+// assetContent 按请求鉴权后**原样**把对象内容发给调用者：不转码、不裁剪、不改一个字节。
+//
+// 与 download 的分工是"稳定地址"与"一次性取件"：download 在对象存储模式下只回一个预签名地址，
+// 它的有效期受 STORAGE_PRESIGN_TTL_MINUTES 限制，签名 Host 又是对象存储端点（未配置
+// STORAGE_S3_PUBLIC_ENDPOINT 时浏览器根本不可达）；目录里 pictures[].url 这类需要长期可引用、
+// 且要能被 <img> 直接加载的地址，只能由本服务每次重新鉴权后转发原档。
+// 可见性判定与 download 完全同一处（readable），不可读一律 404，不区分"无权限"与"不存在"。
+func (h *Handler) assetContent(c *gin.Context) {
+	if !validID(c.Param("id")) {
+		fail(c, 404, "not_found")
+		return
+	}
+	ctx := c.Request.Context()
+	asset, err := h.db.Asset(ctx, c.Param("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		fail(c, 404, "not_found")
+		return
+	}
+	if err != nil {
+		fail(c, 500, "module_error")
+		return
+	}
+	if !h.readable(c, asset) || asset.Status != "complete" {
+		fail(c, 404, "not_found")
+		return
+	}
+	obj, size, err := h.objects.Open(ctx, asset.ObjectKey)
+	if err != nil {
+		fail(c, 503, "storage_unavailable")
+		return
+	}
+	defer obj.Close()
+	c.Header("Content-Type", inlineMime(asset, obj))
+	// 内联而非 attachment：这个地址是给"展示"用的，attachment 会让浏览器另存而不是渲染。
+	c.Header("Content-Disposition", "inline")
+	c.Header("Cache-Control", "private, max-age="+strconv.Itoa(contentCacheSeconds))
+	// 交给 ServeContent：Range 与 If-Modified-Since 由它处理，大文件不用整份读进内存。
+	http.ServeContent(c.Writer, c.Request, asset.FileName, time.Time{}, obj)
+	_ = size
+}
+
+// inlineMime 决定内联响应的内容类型：优先资产登记的 mime（上传时的 mime_type），
+// 缺失或退化成 application/octet-stream 时按扩展名、再按内容嗅探补齐。
+// 类型不对不会让请求失败，只会让浏览器按"用途不符"拒绝渲染（<img> 拿到 text/plain 就是破图），
+// 因此这条兜底必须存在，而不是把 application/octet-stream 直接发出去。
+func inlineMime(asset store.Asset, obj io.ReadSeeker) string {
+	if m := strings.TrimSpace(asset.MimeType); m != "" && !strings.EqualFold(m, "application/octet-stream") {
+		return m
+	}
+	if ext := path.Ext(asset.FileName); ext != "" {
+		if m := mime.TypeByExtension(ext); m != "" {
+			return m
+		}
+	}
+	head := make([]byte, 512)
+	n, _ := obj.Read(head)
+	// 嗅探读走了开头，必须回到起点：剩下的内容由 ServeContent 从当前位置继续发。
+	if _, err := obj.Seek(0, io.SeekStart); err != nil {
+		return "application/octet-stream"
+	}
+	if n <= 0 {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(head[:n])
 }
 
 // listEntityFiles 是"这个介质/轨道/表达上挂了哪些文件"的入口。
