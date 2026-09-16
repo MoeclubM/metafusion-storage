@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"mime"
+	"strings"
 	"testing"
 
 	"github.com/MoeclubM/metafusion-storage/internal/auth"
@@ -49,5 +51,40 @@ func TestCanManageAsset(t *testing.T) {
 	}
 	if canManageAsset(nil, "u1") {
 		t.Fatal("匿名不应可管理文件")
+	}
+}
+
+// 下载响应头必须编码文件名：引号能改写 disposition 的其它参数，
+// 下载响应头必须编码文件名：引号、控制字符与非 ASCII 都不能裸奔
+// 下载响应头必须编码文件名：引号、控制字符与非 ASCII 都不能裸奔
+// （本地模式下文件名完全由上传者提供，见 initiateUpload 的 file_name）。
+func TestContentDispositionEncodesFileName(t *testing.T) {
+	if got := contentDisposition(""); got != "attachment" {
+		t.Fatalf("空文件名应退化成裸 attachment：%q", got)
+	}
+	if got := contentDisposition("track.flac"); got != "attachment; filename=track.flac" {
+		t.Fatalf("普通文件名应原样带出：%q", got)
+	}
+	for _, name := range []string{"a\"; filename=\"evil.exe", "日本語.flac", "line\r\nbreak.flac", "back\\slash.flac"} {
+		got := contentDisposition(name)
+		// 换行会截断响应头（响应拆分），任何编码下都不能出现。
+		if strings.ContainsAny(got, "\r\n") {
+			t.Fatalf("响应头含控制字符：%q -> %q", name, got)
+		}
+		// 非 ASCII 必须走 filename*（RFC 2231）的百分号编码，不能是裸字节。
+		for _, r := range got {
+			if r > 127 {
+				t.Fatalf("响应头含裸非 ASCII 字节：%q -> %q", name, got)
+			}
+		}
+		// 最关键的判据：按标准解析回来必须只得到一个 attachment 与原名，
+		// 名字里的引号/分号不得变成第二个参数。
+		mediatype, params, err := mime.ParseMediaType(got)
+		if err != nil {
+			t.Fatalf("响应头无法解析：%q -> %q (%v)", name, got, err)
+		}
+		if mediatype != "attachment" || len(params) != 1 || params["filename"] != name {
+			t.Fatalf("文件名往返不符：%q -> %q -> %v", name, got, params)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -132,13 +133,27 @@ func (h *Handler) download(c *gin.Context) {
 	}
 	defer obj.Close()
 	c.Header("Content-Type", asset.MimeType)
-	c.Header("Content-Disposition", "attachment; filename=\""+asset.FileName+"\"")
+	c.Header("Content-Disposition", contentDisposition(asset.FileName))
 	http.ServeContent(c.Writer, c.Request, asset.FileName, time.Time{}, obj)
 	_ = size
 }
 
 // verifyHash 两种用法：只给 sha256 是秒传探测（返回是否已存在），
 // 给 asset_id 则读回对象重算摘要，与声明的 sha256 比对并记录校验结果。
+// contentDisposition 生成下载响应头。文件名是上传者提供的任意字符串，
+// 直接拼进 header 会让名字里的引号改写 disposition 的其它参数（非 ASCII 名
+// 也是一串裸字节）；交给 mime.FormatMediaType 编码，必要时走 RFC 2231 的
+// filename*。对象存储模式那一侧由 objects.mimeDisposition 负责，口径一致。
+func contentDisposition(name string) string {
+	if name == "" {
+		return "attachment"
+	}
+	if v := mime.FormatMediaType("attachment", map[string]string{"filename": name}); v != "" {
+		return v
+	}
+	return "attachment"
+}
+
 func (h *Handler) verifyHash(c *gin.Context) {
 	var in struct {
 		AssetID    string `json:"asset_id"`
