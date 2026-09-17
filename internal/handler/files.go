@@ -237,8 +237,7 @@ func (h *Handler) verifyHash(c *gin.Context) {
 		AssetID    string `json:"asset_id"`
 		SHA256Hash string `json:"sha256_hash"`
 	}
-	if err := c.ShouldBindJSON(&in); err != nil {
-		fail(c, 400, "invalid_payload")
+	if !body(c, &in) {
 		return
 	}
 	ctx := c.Request.Context()

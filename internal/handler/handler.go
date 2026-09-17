@@ -5,6 +5,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -65,6 +66,27 @@ func (h *Handler) Register(r *gin.Engine) {
 
 func fail(c *gin.Context, status int, code string) {
 	c.JSON(status, gin.H{"error": code})
+}
+
+// maxJSONBody 是 JSON 写接口的请求体上限。必须自己封顶：网关的 client_max_body_size 是 1G，
+// 应用层不设限就等于把"一个请求能让服务占多少内存"交给调用方决定。
+const maxJSONBody = 2 << 20
+
+// body 是 JSON 写接口统一的请求解析：2MB 上限 + 拒绝未知字段。
+//
+// 与流式上传（streamUpload）分成两档是刻意的：那里收到的就是文件本身，上限按
+// STORAGE_MAX_UPLOAD_MB 单独声明；这四个端点只收元数据，2MB 足够。
+// 未知字段一律拒绝而不是静默忽略：字段名拼错的请求不会再"看起来成功了"，
+// 与目录服务、互动服务的写接口同一口径。
+func body(c *gin.Context, v any) bool {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONBody)
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		fail(c, 400, "invalid_payload")
+		return false
+	}
+	return true
 }
 
 // requireUpload 要求登录且持有 storage.asset.upload：上传（创建自己的资产、完成直传）
@@ -159,8 +181,7 @@ type initiateResponse struct {
 // 同一 sha256 的未完成上传由上传者本人续传，避免两个客户端互相覆盖。
 func (h *Handler) initiateUpload(c *gin.Context) {
 	var in initiateRequest
-	if err := c.ShouldBindJSON(&in); err != nil {
-		fail(c, 400, "invalid_payload")
+	if !body(c, &in) {
 		return
 	}
 	in.FileName = strings.TrimSpace(in.FileName)
@@ -336,7 +357,7 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		UploadID string         `json:"upload_id"`
 		Parts    []objects.Part `json:"parts"`
 	}
-	if err := c.ShouldBindJSON(&in); err != nil || in.AssetID == "" {
+	if !body(c, &in) || in.AssetID == "" {
 		fail(c, 400, "invalid_payload")
 		return
 	}
@@ -463,6 +484,10 @@ func (h *Handler) streamUpload(c *gin.Context) {
 		fail(c, 403, "forbidden")
 		return
 	}
+	// 单列一档上限而不是复用 JSON 写接口的 2MB：这里收到的是原始文件字节，
+	// 大小由 STORAGE_MAX_UPLOAD_MB（默认 0 = 不限制，大文件优先）决定，
+	// 声明的大小在 initiate 与落定阶段另有校验。网关的 client_max_body_size 是 1G，
+	// 因此未配置该变量时本服务不额外收口。
 	if h.cfg.MaxUploadMB > 0 {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64(h.cfg.MaxUploadMB)<<20)
 	}
@@ -498,7 +523,7 @@ func (h *Handler) bind(c *gin.Context) {
 		TargetEntityType string `json:"target_entity_type"`
 		BindingRole      string `json:"binding_role"`
 	}
-	if err := c.ShouldBindJSON(&in); err != nil || in.AssetID == "" || in.TargetEntityID == "" {
+	if !body(c, &in) || in.AssetID == "" || in.TargetEntityID == "" {
 		fail(c, 400, "invalid_payload")
 		return
 	}
