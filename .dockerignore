@@ -1,0 +1,16 @@
+# 构建上下文是**仓库根**（两个镜像共用）：
+#   - 存储服务镜像：仓库根的 Dockerfile（COPY . .）
+#   - 存储管理台：admin/Dockerfile（主编排传 context=${MF_STORAGE_DIR}、dockerfile=admin/Dockerfile）
+# 因此忽略文件只能放在上下文根这一处；放在 admin/ 下面不会生效。
+# Dockerfile 自己的 COPY 名单不受影响，这里只是别把 node_modules/.next/数据目录塞进上下文。
+.git
+.github
+**/node_modules
+admin/.next
+admin/out
+admin/next-env.d.ts
+admin/*.tsbuildinfo
+storage-data
+*.log
+.env
+.env.*

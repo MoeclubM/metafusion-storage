@@ -50,3 +50,25 @@ jobs:
         # -p 1：handler 与 store 两个共用同一个测试库，store 包的清理会删掉 handler 包的资产，
         # 并行跑会偶发失败（在 HEAD 上可复现，不是某一批改动引入的）。
         run: go test -p 1 ./...
+
+  admin:
+    name: admin (typecheck / i18n / build)
+    runs-on: ubuntu-latest
+    # 管理台是与 Go 服务并列的独立应用（解耦审计 §7.3「每服务自带 UI」）：
+    # 它只依赖 /api/storage 的 HTTP 契约，因此这一步不启动任何后端，CI 里跑的是构建期能发现的问题。
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4"
+      - name: bun install
+        run: bun install --frozen-lockfile
+      - name: typecheck
+        run: bun run typecheck
+      - name: i18n 四语键一致性
+        run: bun run i18n:check
+      - name: next build
+        run: bun run build
