@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/MoeclubM/metafusion-storage/internal/auth"
 	"github.com/MoeclubM/metafusion-storage/internal/catalog"
 	"github.com/MoeclubM/metafusion-storage/internal/config"
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
@@ -115,12 +116,18 @@ func newUploadHarnessWith(t *testing.T, useS3 bool, verifyMaxMB int) *uploadHarn
 }
 
 // token 用给定 subject 签一个普通用户令牌：存储侧只认令牌里的 id 作为上传者身份。
+//
+// permissions 必须带 storage.asset.upload：上传与绑定自 6c4b3cf 起按该码收口
+// （requireUpload 中间件），而 member 组默认持有它；不带码的令牌在这里只会在
+// initiate 第一步就 403，用例根本走不到被测逻辑（缺码的语义另由
+// TestUploadRequiresUploadPermission 覆盖）。
 func (h *uploadHarness) token(subject string) string {
 	h.t.Helper()
 	payload := jwt.MapClaims{
 		"sub":                subject,
 		"preferred_username": "tester",
 		"role":               "user",
+		"permissions":        []string{auth.PermissionAssetUpload},
 		"iss":                testIssuer,
 		"aud":                testAudience,
 		"exp":                time.Now().Add(10 * time.Minute).Unix(),
