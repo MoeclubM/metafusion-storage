@@ -1,0 +1,83 @@
+"use client";
+// 来源：MetaFusion/frontend/src/i18n/I18nProvider.tsx（逐字复制）。
+// 语言状态只落在 NEXT_LOCALE cookie 上：与主站同域，用户在任一应用切换语言，另一边也跟着变。
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { defaultLocale, localeCookieName, normalizeLocale, type Locale } from "./routing";
+import { getMessages, translate, translateOr } from "./getMessages";
+
+type Ctx = {
+  locale: Locale;
+  t: (key: string, vars?: Record<string, string | number>) => string;
+  tr: (key: string, fallback: string, vars?: Record<string, string | number>) => string;
+  setLocale: (next: Locale) => void;
+};
+
+const I18nContext = createContext<Ctx>({
+  locale: defaultLocale,
+  t: (k) => k,
+  tr: (_k, fb) => fb,
+  setLocale: () => {},
+});
+
+function readCookieLocale(): string | null {
+  if (typeof document === "undefined") return null;
+  const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${localeCookieName}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+
+function writeCookieLocale(locale: Locale) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${localeCookieName}=${encodeURIComponent(locale)}; Path=/; Max-Age=${60 * 60 * 24 * 365}; SameSite=Lax`;
+}
+
+export function I18nProvider({
+  children,
+  initialLocale,
+}: {
+  children: React.ReactNode;
+  initialLocale?: string | null;
+}) {
+  const [locale, setLocaleState] = useState<Locale>(() => normalizeLocale(initialLocale));
+
+  useEffect(() => {
+    const c = readCookieLocale();
+    if (c) {
+      const n = normalizeLocale(c);
+      if (n !== locale) setLocaleState(n);
+    }
+    // 只在挂载时读一次 cookie：之后以本应用的状态为准（setLocale 会写回同一个 cookie）。
+  }, []);
+
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = locale;
+    }
+  }, [locale]);
+
+  const messages = useMemo(() => getMessages(locale), [locale]);
+
+  const t = useCallback(
+    (key: string, vars?: Record<string, string | number>) => translate(messages, key, vars),
+    [messages]
+  );
+
+  const tr = useCallback(
+    (key: string, fallback: string, vars?: Record<string, string | number>) =>
+      translateOr(messages, key, fallback, vars),
+    [messages]
+  );
+
+  const setLocale = useCallback((next: Locale) => {
+    const n = normalizeLocale(next);
+    setLocaleState(n);
+    writeCookieLocale(n);
+  }, []);
+
+  const value = useMemo<Ctx>(() => ({ locale, t, tr, setLocale }), [locale, t, tr, setLocale]);
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n() {
+  return useContext(I18nContext);
+}
