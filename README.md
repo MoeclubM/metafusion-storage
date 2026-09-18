@@ -48,6 +48,23 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 代码里的判定不做角色比较：给某个组授予 `storage.asset.moderate` 即可让成员承担审核（例如建一个
 `storage_moderator` 组），不必再改本服务代码。
 
+**个人访问令牌（PAT）**：`Authorization: Bearer mfp_…`（`mfp_` + 43 位 base62）由账号服务的
+`POST /api/auth/tokens/introspect` 判定，本服务**不读账号库、不签发、不落盘凭据**。内省拿到的身份与 JWT 同形
+（id / username / role / permissions），但**权限一律按 permissions 里的码判定**：即使权限集合为空也绝不回落到
+角色兜底或历史的"登录即可"边界——PAT 的权限就是账号服务算好的"用户自身权限 ∩ scopes"，否则 `scopes=[]`
+的管理员令牌会变成全权令牌（创建端点已禁止空 scopes，这是第二道防线）。
+
+- 内省结果按明文 sha256 **进程内缓存 60 秒**（同键并发只打一次账号服务，缓存有上限与逐出），
+  因此**吊销与过期最长 60 秒后才在本服务生效**；
+- 本地先做形态预检（`mfp_` + 43 位 base62），明显非法的明文直接 `401 invalid_token`，不打账号服务；
+- 令牌无效 / 已吊销 / 已过期 / 账号被封禁 → `401 invalid_token`（共用一个稳定机器码，不细分原因）；
+- 账号服务不可达、内省端点未上线或未配置 `AUTH_URL` → `503 auth_unavailable`，**不是 401**：
+  那是依赖故障，回 401 会让 bot/CI 以为凭据有问题去换令牌（换令牌解决不了，重试才行）；
+- PAT 请求不回落 `mf_session` Cookie（浏览器里可能同时有另一个用户的会话），也不产出 Cookie。
+  实现与回归见 `internal/auth/pat.go`；三处（目录 / 互动 / 存储）必须同改，口径见主仓库 README 的同名字段。
+
+
+
 ### 绑定用途（binding_role）
 
 `binding_role` 用字段码表达用途，默认 `master_archive`，取值需匹配 `^[a-z][a-z0-9_]{0,31}$`，
@@ -65,7 +82,7 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 | `STORAGE_S3_PUBLIC_ENDPOINT` | 同内部端点 | 客户端直传使用的对外地址。SigV4 覆盖 Host，必须用浏览器可达的地址签发，否则反代后签名校验失败 |
 | `STORAGE_S3_ACCESS_KEY` / `_SECRET_KEY` / `_BUCKET` / `_TLS` | — | 对象存储凭据与桶（旧名 `ARCHIVE_S3_*` 同义） |
 | `STORAGE_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
-| `AUTH_URL` | 空 | 账号服务地址，仅用于存量不透明会话令牌的兜底解析（`GET /api/auth/me`）；留空即"只接受 JWT" |
+| `AUTH_URL` | 空 | 账号服务地址：存量不透明会话令牌的兜底解析（`GET /api/auth/me`）与 PAT 内省（`POST /api/auth/tokens/introspect`）；留空即"只接受 JWT"且 PAT 一律 `503 auth_unavailable` |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库保持一致，避免存量令牌失效 |
 | `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性判定） |

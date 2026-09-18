@@ -71,6 +71,11 @@ func main() {
 	// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
 	if cfg.AuthURL != "" {
 		verifier.SetFallback(auth.NewSessionClient(cfg.AuthURL, 5*time.Second))
+		// PAT（mfp_ 前缀）与会话兜底共用同一个账号服务地址：带 mfp_ 的请求走内省端点
+		// POST /api/auth/tokens/introspect，结果进程内缓存 60 秒（= 吊销窗口），见 internal/auth/pat.go。
+		verifier.SetPAT(auth.NewPATIntrospector(cfg.AuthURL))
+	} else {
+		log.Print("AUTH_URL is not configured: personal access tokens (mfp_ prefix) will be rejected with 503 auth_unavailable")
 	}
 
 	r := gin.New()

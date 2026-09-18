@@ -31,6 +31,9 @@ type Principal struct {
 	Role        string   `json:"role"`
 	Groups      []string `json:"groups,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
+	// FromPAT 标记身份来自 PAT 内省（而不是签发的 JWT）。它参与授权判定
+	// （见 permission.go：PAT 身份永不回落角色兜底），不进 JSON 输出、不暴露给调用方。
+	FromPAT bool `json:"-"`
 }
 
 // SessionResolver 是存量令牌的兜底：用户可能还持有登录时发的不透明会话令牌（不是 JWT）。
@@ -100,6 +103,9 @@ type Verifier struct {
 	static   *rsa.PublicKey
 	client   *http.Client
 	fallback SessionResolver
+	// pat 是个人访问令牌的内省器（见 pat.go）。为 nil（未配置 AUTH_URL）时，
+	// 带 mfp_ 前缀的请求一律 503 auth_unavailable——身份只能问账号服务。
+	pat *PATIntrospector
 
 	mu        sync.Mutex
 	keys      map[string]*rsa.PublicKey
@@ -136,6 +142,9 @@ func New(cfg config.Config) (*Verifier, error) {
 
 // SetFallback 注入会话兜底解析器（nil 表示只接受 JWT）。
 func (v *Verifier) SetFallback(r SessionResolver) { v.fallback = r }
+
+// SetPAT 注入 PAT 内省器；nil 表示不接 PAT（带 mfp_ 的请求回 503 auth_unavailable）。
+func (v *Verifier) SetPAT(p *PATIntrospector) { v.pat = p }
 
 func parsePublicKey(raw string) (*rsa.PublicKey, error) {
 	text := strings.TrimSpace(raw)
@@ -296,19 +305,30 @@ func rsaFromJWK(nB64, eB64 string) (*rsa.PublicKey, error) {
 }
 
 // Middleware 解析身份但不拦截：带令牌且有效时写入上下文，供需要时读取。
+// PAT 路径例外：无效 PAT 401 invalid_token、账号服务不可达 503 auth_unavailable，
+// 这两种情况必须在这里结束请求（放行成匿名会让调用方拿到语义错误的 401
+// authentication_required，把"依赖故障"误报成"凭据错"）。
 func (v *Verifier) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if p := v.resolve(c); p != nil {
+		p, status := v.resolve(c)
+		if rejectPAT(c, status) {
+			return
+		}
+		if p != nil {
 			c.Set(principalKey, p)
 		}
 		c.Next()
 	}
 }
 
-// Required 要求已登录：无有效身份直接 401。
+// Required 要求已登录：无有效身份直接 401（PAT 的失败语义见 Middleware）。
 func (v *Verifier) Required() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if p := v.resolve(c); p != nil {
+		p, status := v.resolve(c)
+		if rejectPAT(c, status) {
+			return
+		}
+		if p != nil {
 			c.Set(principalKey, p)
 			c.Next()
 			return
@@ -317,17 +337,50 @@ func (v *Verifier) Required() gin.HandlerFunc {
 	}
 }
 
-func (v *Verifier) resolve(c *gin.Context) *Principal {
+// resolve 把请求换算成身份与终局状态。
+//
+// PAT（Authorization: Bearer mfp_...）**只走内省**，且不回落到 cookie：浏览器里可能同时存在
+// 另一个用户的 mf_session，回落到它会把"机器身份"悄悄变成"浏览器登录身份"。
+// JWT 与不透明会话令牌的路径完全不变：验签失败仍按匿名继续（fail closed），
+// 由各端点的 Required/require 决定 401——账号服务挂在 /api/auth/me 兜底上时，
+// 这里也不会把普通浏览器的匿名读请求变成 503。
+func (v *Verifier) resolve(c *gin.Context) (*Principal, patStatus) {
 	bearer, cookie := credentials(c.Request)
+	if IsPAT(bearer) {
+		ident, err := v.introspectPAT(c.Request.Context(), bearer)
+		switch {
+		case err != nil:
+			return nil, patUnavailable
+		case ident == nil:
+			return nil, patInvalid
+		}
+		return ident, patOK
+	}
 	if p, err := v.Verify(bearer); err == nil {
-		return p
+		return p, patOK
 	}
 	if v.fallback != nil {
 		if p, ok := v.fallback.Resolve(c.Request.Context(), bearer, cookie); ok {
-			return p
+			return p, patOK
 		}
 	}
-	return nil
+	return nil, patOK
+}
+
+// introspectPAT 是 PAT 的内省入口：内省器未注入（未配置 AUTH_URL）时按不可用处理。
+// 身份只能问账号服务，本服务不查 auth 库，也不在本地缓存明文。
+func (v *Verifier) introspectPAT(ctx context.Context, token string) (*Principal, error) {
+	if v == nil || v.pat == nil {
+		return nil, errPATUnavailable
+	}
+	ident, err := v.pat.Introspect(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if ident == nil {
+		return nil, nil
+	}
+	return ident.principal(), nil
 }
 
 func credentials(r *http.Request) (string, string) {

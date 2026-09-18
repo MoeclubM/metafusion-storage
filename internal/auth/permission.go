@@ -43,6 +43,21 @@ const (
 // 不会因为角色是 admin 就放行别的子系统的码（catalog.* / community.* / auth.* 归各自服务）。
 var storagePermissionCodes = []string{PermissionAssetUpload, PermissionAssetModerate}
 
+// HasPermission 是**纯权限码集合判定**：只看 permissions 里的码（* 通配即全权），
+// 不做任何角色兜底。PAT 身份（FromPAT）一律走它——PAT 的权限集合可能为空
+// （scopes 里没有本服务的任何码），空集合必须表现为"什么都不许"，而不是回落到角色上拿权。
+func (p *Principal) HasPermission(code string) bool {
+	if p == nil {
+		return false
+	}
+	for _, granted := range p.Permissions {
+		if granted == permissionWildcard || granted == code {
+			return true
+		}
+	}
+	return false
+}
+
 // Can 报告调用者是否持有某个权限码（匿名一律不放行）。
 //
 // 令牌带 permissions 时一律以码为准（`*` 通配即全权）：拆服务后这是唯一的授权来源，
@@ -50,17 +65,16 @@ var storagePermissionCodes = []string{PermissionAssetUpload, PermissionAssetMode
 // 管理员在后台收回权限组后，本服务必须跟着不认。
 // 只有令牌完全没有 permissions 声明时（老令牌，或尚未按权限组配置的实例）才按历史角色兜底：
 // admin 放行全部存储码，其余角色一律不放行；与拆分前「只有 admin 有额外权力」逐条对应。
+//
+// FromPAT（身份来自 PAT 内省）时**永不**回落到角色兜底：PAT 的权限就是账号服务算好的
+// "用户自身权限 ∩ scopes"，scopes 空时就是空。若把它当"没有 permissions 声明"处理，
+// 一个 scopes=[] 的管理员 PAT 会因为角色兜底拿到全部存储权限——收窄 scopes 也就形同虚设。
 func (p *Principal) Can(code string) bool {
 	if p == nil {
 		return false
 	}
-	if len(p.Permissions) > 0 {
-		for _, granted := range p.Permissions {
-			if granted == permissionWildcard || granted == code {
-				return true
-			}
-		}
-		return false
+	if len(p.Permissions) > 0 || p.FromPAT {
+		return p.HasPermission(code)
 	}
 	return p.Role == "admin" && containsCode(storagePermissionCodes, code)
 }
