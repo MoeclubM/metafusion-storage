@@ -1,3 +1,6 @@
-# 管理台不是给搜索引擎看的：整条前缀都不索引（页面本身也要求登录）。
+# 本文件不是本管理台的收录防护：应用 basePath 是 /admin/storage，它会被服务在
+# /admin/storage/robots.txt，而爬虫只读源站根的 /robots.txt（由主前端作答）。
+# 真正生效的是 src/app/layout.tsx 里 generateMetadata 的 robots:{index:false}。
+# 保留本文件只为"这个应用将来被挂到某个源站根路径"的情形，规则本身仍然正确。
 User-agent: *
 Disallow: /admin/storage/

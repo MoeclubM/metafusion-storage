@@ -8,10 +8,18 @@ import { localeCookieName, normalizeLocale } from "@/shared/i18n/routing";
 import "@/shared/theme/globals.css";
 
 // 语言在服务端就定下来（读 NEXT_LOCALE cookie），避免首屏先按默认语言渲染再跳到用户语言。
+//
+// robots 必须写在这里，不能只靠 public/robots.txt：本应用 basePath 是 /admin/storage，
+// 那份 robots.txt 会被服务在 /admin/storage/robots.txt，而爬虫只读源站根的 /robots.txt
+// （由主前端作答），等于没有任何收录防护。账号与社区两个管理台同样是靠这条 meta 收敛的。
 export function generateMetadata(): Metadata {
   const locale = normalizeLocale(cookies().get(localeCookieName)?.value);
   const messages = getMessages(locale);
-  return { title: messages["meta.title"], description: messages["meta.description"] };
+  return {
+    title: messages["meta.title"],
+    description: messages["meta.description"],
+    robots: { index: false, follow: false },
+  };
 }
 
 // 主题与主站共用 localStorage 口径（metafusion_theme_mode / _accent / _tone）：登录态、语言、主题
