@@ -13,8 +13,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/MoeclubM/metafusion-storage/internal/auth"
+	"github.com/MoeclubM/metafusion-storage/internal/catalog"
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
+	"github.com/MoeclubM/metafusion-storage/internal/upstream"
 )
 
 // maxBindingProbe 限制一次读取鉴权最多问目录服务几次：绑定是"文件属于谁"的少量元数据，
@@ -28,28 +30,59 @@ const contentCacheSeconds = 300
 // readable 是文件读取的唯一判定：上传者本人或持 storage.asset.moderate 的审核者直通，
 // 其余人只要**任一**绑定目标可见即可读（直通档位同 canManageAsset，替换拆分前的 role == admin）。
 // 与下载、预览、哈希校验共用同一判定，避免同一份文件在不同接口上口径不同。
-func (h *Handler) readable(c *gin.Context, asset store.Asset) bool {
+//
+// 第二个返回值只在"问不到目录服务"时非 nil：调用方必须回 503，不能折成"不可读"。
+// 查库失败仍按不可读处理（与拆分前一致，属本地依赖，现场有日志）；而"目录结论不可知"
+// 必须对调用方可观测，否则上游抖动会表现成 404。
+func (h *Handler) readable(c *gin.Context, asset store.Asset) (bool, error) {
 	p := auth.Current(c)
 	if canManageAsset(p, asset.UploaderID) {
-		return true
+		return true, nil
 	}
 	if asset.Status != "complete" {
-		return false
+		return false, nil
 	}
 	bindings, err := h.db.BindingsForAsset(c.Request.Context(), asset.ID)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	if len(bindings) > maxBindingProbe {
 		bindings = bindings[:maxBindingProbe]
 	}
 	bearer, cookie := h.credentials(c)
 	for _, b := range bindings {
-		if _, ok := h.catalog.Visible(c.Request.Context(), b.TargetEntityID, bearer, cookie); ok {
-			return true
+		_, err := h.catalog.Visible(c.Request.Context(), b.TargetEntityID, bearer, cookie)
+		if err == nil {
+			return true, nil
 		}
+		if errors.Is(err, catalog.ErrNotVisible) {
+			// 这一条绑定不可见（含合并后查无此实体）：继续看下一条——只要有一个绑定
+			// 目标可见，这份文件就可读。
+			continue
+		}
+		// 问不到目录服务：不能当成"这条绑定不可见"继续往下试，否则目录服务一抖
+		// 就表现成"这份文件不存在"。
+		return false, err
 	}
-	return false
+	return false, nil
+}
+
+// denyUnreadable 把 readable 的结论写成响应，返回 true 表示请求已处理完（调用方直接 return）。
+// 上游不可用 → 503 + upstream_unavailable（可观测的依赖故障）；
+// 不可读 → 仍是原来的 404 not_found（不区分"无权限"与"不存在"，避免泄露他人上传的存在性）。
+func (h *Handler) denyUnreadable(c *gin.Context, asset store.Asset) bool {
+	ok, err := h.readable(c, asset)
+	if err == nil && ok {
+		return false
+	}
+	if err != nil {
+		h.log.Printf("storage: asset %s 读取鉴权问不到目录服务，回 503 %s: %v",
+			asset.ID, upstream.CodeUpstreamUnavailable, err)
+		fail(c, http.StatusServiceUnavailable, upstream.CodeUpstreamUnavailable)
+		return true
+	}
+	fail(c, http.StatusNotFound, "not_found")
+	return true
 }
 
 func (h *Handler) getAsset(c *gin.Context) {
@@ -67,8 +100,7 @@ func (h *Handler) getAsset(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
-	if !h.readable(c, asset) {
-		fail(c, 404, "not_found")
+	if h.denyUnreadable(c, asset) {
 		return
 	}
 	bindings, err := h.db.BindingsForAsset(ctx, asset.ID)
@@ -117,7 +149,7 @@ func (h *Handler) assetContent(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
-	if !h.readable(c, asset) || asset.Status != "complete" {
+	if h.denyUnreadable(c, asset) || asset.Status != "complete" {
 		fail(c, 404, "not_found")
 		return
 	}
@@ -179,7 +211,6 @@ func (h *Handler) listEntityFiles(c *gin.Context) {
 	entityID := c.Param("id")
 	kind, ok := h.visibleEntity(c, entityID)
 	if !ok {
-		fail(c, 404, "not_found")
 		return
 	}
 	files, err := h.db.BindingsForEntity(c.Request.Context(), entityID)
@@ -206,7 +237,7 @@ func (h *Handler) download(c *gin.Context) {
 		return
 	}
 	// 不可读一律回 404：不区分"无权限"与"不存在"，避免泄露他人上传的存在性。
-	if !h.readable(c, asset) || asset.Status != "complete" {
+	if h.denyUnreadable(c, asset) || asset.Status != "complete" {
 		fail(c, 404, "not_found")
 		return
 	}
@@ -281,7 +312,20 @@ func (h *Handler) verifyHash(c *gin.Context) {
 		// 秒传探测与 initiate 同一条判据：只有服务端验过内容的资产才算"已有这份内容"。
 		// 未验证的命中按不存在返回，客户端会走正常上传，不会白等一份错内容。
 		asset, err := h.db.VerifiedAssetByHash(ctx, sha)
-		if err != nil || !h.readable(c, asset) {
+		if err != nil {
+			// 无权读取的内容一律当作不存在。
+			c.JSON(200, gin.H{"exists": false})
+			return
+		}
+		ok, uerr := h.readable(c, asset)
+		if uerr != nil {
+			// 问不到目录服务：不能回 exists:false——那是"这份内容不存在"的业务结论，
+			// 会把依赖故障说成事实。客户端按 503 重试即可（探测失败不影响内容安全）。
+			h.log.Printf("storage: 秒传探测问不到目录服务，回 503 %s: %v", upstream.CodeUpstreamUnavailable, uerr)
+			fail(c, http.StatusServiceUnavailable, upstream.CodeUpstreamUnavailable)
+			return
+		}
+		if !ok {
 			// 无权读取的内容一律当作不存在。
 			c.JSON(200, gin.H{"exists": false})
 			return
@@ -314,8 +358,7 @@ func (h *Handler) verifyHash(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
-	if !h.readable(c, asset) {
-		fail(c, 404, "not_found")
+	if h.denyUnreadable(c, asset) {
 		return
 	}
 	digest, size, verr := h.objects.VerifyHash(ctx, asset.ObjectKey, "")

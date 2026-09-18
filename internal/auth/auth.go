@@ -19,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/MoeclubM/metafusion-storage/internal/config"
+	"github.com/MoeclubM/metafusion-storage/internal/upstream"
 )
 
 // Principal 是验签后的调用者身份。只信令牌里的字段：
@@ -43,37 +44,65 @@ type SessionResolver interface {
 	Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool)
 }
 
+// authPolicy 是账号服务出站调用的策略，会话兜底与 PAT 内省**共用同一份参数**：
+// 两者指向同一个上游、同一套降级语义，参数分叉会让"同一个账号服务故障"在两个调用点上有两种表现。
+// 超时分层与重试都收在这里，调用方不再各自传一个 http.Client 超时。
+func authPolicy(name string) upstream.Policy {
+	p := upstream.DefaultPolicy(name)
+	p.Attempts = 2
+	p.AttemptTimeout = 1500 * time.Millisecond
+	p.Budget = 4 * time.Second
+	p.BaseBackoff = 100 * time.Millisecond
+	p.MaxBackoff = 400 * time.Millisecond
+	p.Jitter = 0.5
+	p.BreakerThreshold = 5
+	p.BreakerOpenFor = 10 * time.Second
+	return p
+}
+
 // SessionClient 是与账号服务约定的兜底解析实现：把原样的 Bearer/Cookie 转给
 // `GET /api/auth/me`，由账号服务验签或查会话表后返回身份。
 // 账号服务是唯一身份来源——目录服务不参与身份判定，因此这里不指向 CATALOG_URL。
 type SessionClient struct {
 	base string
-	http *http.Client
+	up   *upstream.Client
 }
 
-func NewSessionClient(baseURL string, timeout time.Duration) *SessionClient {
-	if timeout <= 0 {
-		timeout = 5 * time.Second
+// NewSessionClient 用账号服务基址建兜底解析器；baseURL 为空时它存在但一律判为"无身份"。
+// 单次尝试 1.5s、总预算 4s、两次尝试（见 authPolicy）——账号服务抖一下不再直接等于身份丢失。
+func NewSessionClient(baseURL string) *SessionClient {
+	return &SessionClient{
+		base: strings.TrimRight(baseURL, "/"),
+		up:   upstream.New(authPolicy("auth")),
 	}
-	return &SessionClient{base: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: timeout}}
 }
+
+// Upstream 暴露出站执行器给深探针：/ready?deep=1 必须复用请求路径上的同一个熔断器。
+func (c *SessionClient) Upstream() *upstream.Client { return c.up }
 
 func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool) {
 	if c.base == "" || (bearer == "" && cookie == "") {
 		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/auth/me", nil)
-	if err != nil {
-		return nil, false
-	}
+	header := http.Header{}
 	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		header.Set("Authorization", "Bearer "+bearer)
 	}
 	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: "mf_session", Value: cookie})
+		header.Add("Cookie", (&http.Cookie{Name: "mf_session", Value: cookie}).String())
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.up.Do(ctx, upstream.Request{
+		Method: http.MethodGet,
+		URL:    c.base + "/api/auth/me",
+		Header: header,
+	})
 	if err != nil {
+		// 兜底失败仍按"无身份"继续（返回 false），这是刻意保留的口径：Verifier.resolve 不能让
+		// 账号服务抖动把普通浏览器的匿名读请求全变成 503。但失败必须留痕，否则线上只表现为
+		// "用户莫名 401"，看不出是依赖故障。
+		if ctx.Err() == nil {
+			slog.Warn("storage: 会话兜底解析失败，按未登录继续", "err", err.Error())
+		}
 		return nil, false
 	}
 	defer resp.Body.Close()
@@ -102,6 +131,8 @@ type Verifier struct {
 	audience string
 	jwksURL  string
 	static   *rsa.PublicKey
+	// client 只服务 JWKS 拉取，刻意**不**套 upstream 的重试与熔断：公钥拉取自带 10 分钟缓存、
+	// 未知 kid 强刷与"刷新失败回落缓存公钥"的降级顺序，加一层重试/熔断会改变验签的降级路径。
 	client   *http.Client
 	fallback SessionResolver
 	// pat 是个人访问令牌的内省器（见 pat.go）。为 nil（未配置 AUTH_URL）时，

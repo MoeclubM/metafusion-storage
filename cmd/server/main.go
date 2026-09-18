@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/nettrust"
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
+	"github.com/MoeclubM/metafusion-storage/internal/upstream"
 )
 
 // humanBytes / humanDuration 只用于启动日志：0 表示"不限制"，不能打成 0 MB / 0s。
@@ -36,6 +38,17 @@ func humanDuration(d time.Duration) string {
 		return "unlimited"
 	}
 	return d.String()
+}
+
+// upstreamReadyURL 把上游基址拼成深探针地址；未配置地址返回空串——
+// ProbeAll 会把空地址记为 not_configured（那是部署态，不是"上游挂了"），
+// 因此这里不需要在调用点写特例。
+func upstreamReadyURL(base string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/ready"
 }
 
 func main() {
@@ -79,15 +92,34 @@ func main() {
 	if err != nil {
 		log.Fatalf("token verifier initialization failed: %v", err)
 	}
-	// 存量兜底：浏览器可能还持有登录时的不透明会话令牌（非 JWT）。身份只能问账号服务，
-	// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
+	// 跨服务出站都走 upstream 执行器（超时分层 + 有界重试 + 熔断，见 internal/upstream）：
+	// 目录可见性、会话兜底、PAT 内省各建一个、长期复用——连接池与熔断器都在实例里，
+	// 每次请求新建等于每请求一个熔断器（永远闭合，等于没熔断）。
+	// 未配置 AUTH_URL 时这两个客户端仍存在但不会被注入，深探针据此记 not_configured。
+	sessionClient := auth.NewSessionClient(cfg.AuthURL)
+	patIntrospector := auth.NewPATIntrospector(cfg.AuthURL)
 	if cfg.AuthURL != "" {
-		verifier.SetFallback(auth.NewSessionClient(cfg.AuthURL, 5*time.Second))
+		// 存量兜底：浏览器可能还持有登录时的不透明会话令牌（非 JWT）。身份只能问账号服务，
+		// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
+		verifier.SetFallback(sessionClient)
 		// PAT（mfp_ 前缀）与会话兜底共用同一个账号服务地址：带 mfp_ 的请求走内省端点
 		// POST /api/auth/tokens/introspect，结果进程内缓存 60 秒（= 吊销窗口），见 internal/auth/pat.go。
-		verifier.SetPAT(auth.NewPATIntrospector(cfg.AuthURL))
+		verifier.SetPAT(patIntrospector)
 	} else {
 		log.Print("AUTH_URL is not configured: personal access tokens (mfp_ prefix) will be rejected with 503 auth_unavailable")
+	}
+	// 启动时把实际生效的出站参数打出来：调用点只写自己关心的字段，其余由策略兜底收敛，
+	// 排查"为什么这次调用退避了 5 次"时不该靠读代码。
+	catPolicy := cat.Upstream().Policy()
+	authOutPolicy := sessionClient.Upstream().Policy()
+	log.Printf("upstream policies: catalog(attempts=%d attempt=%s budget=%s breaker=%d/%s) auth(attempts=%d attempt=%s budget=%s breaker=%d/%s)",
+		catPolicy.Attempts, catPolicy.AttemptTimeout, catPolicy.Budget, catPolicy.BreakerThreshold, catPolicy.BreakerOpenFor,
+		authOutPolicy.Attempts, authOutPolicy.AttemptTimeout, authOutPolicy.Budget,
+		authOutPolicy.BreakerThreshold, authOutPolicy.BreakerOpenFor)
+	// 深探针目标：地址来自配置（未配置即 not_configured），执行器与请求路径共用。
+	upstreamProbes := []upstream.ProbeTarget{
+		{Client: cat.Upstream(), URL: upstreamReadyURL(cfg.CatalogURL)},
+		{Client: sessionClient.Upstream(), URL: upstreamReadyURL(cfg.AuthURL)},
 	}
 
 	r := gin.New()
@@ -115,6 +147,9 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "live", "service": "metafusion-storage"})
 	})
+	// /ready 是两级探针：浅探针保持"只探 PG、毫秒级"（编排按固定间隔打它，不能被上游拖慢，
+	// 也不能因为上游抖动就把一个还能正常读写的实例摘掉）；deep=1 才并发探上游，
+	// 回答的是"依赖全绿吗"，用于人工排障与深探监测。
 	r.GET("/ready", func(c *gin.Context) {
 		check, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
@@ -122,7 +157,22 @@ func main() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ready", "dependencies": []string{"postgres"}})
+		if c.Query("deep") != "1" {
+			c.JSON(http.StatusOK, gin.H{"status": "ready", "dependencies": []string{"postgres"}})
+			return
+		}
+		// 总预算 3s 由 ProbeAll 兜住：深探针不能被测不通的上游拖成慢探针。
+		// 未配置地址的目标记为 not_configured（部署态）——它仍是"这一个上游不 ready"，
+		// 因此与真正的不可用一样让深探回 degraded，让"没配"和"配了但挂了"都不会被漏看。
+		results := upstream.ProbeAll(c.Request.Context(), 3*time.Second, upstreamProbes)
+		status, code := "ready", http.StatusOK
+		for _, res := range results {
+			if res.Status != upstream.ProbeReady {
+				status, code = "degraded", http.StatusServiceUnavailable
+				break
+			}
+		}
+		c.JSON(code, gin.H{"status": status, "dependencies": []string{"postgres"}, "upstreams": results})
 	})
 
 	// 刻意不设 ReadTimeout/WriteTimeout：大文件直传与本地对象模式下的整份下发

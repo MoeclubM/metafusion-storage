@@ -22,6 +22,7 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/config"
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
+	"github.com/MoeclubM/metafusion-storage/internal/upstream"
 )
 
 var (
@@ -142,16 +143,28 @@ func (h *Handler) credentials(c *gin.Context) (string, string) {
 
 // visibleEntity 通过目录服务确认实体可见，并返回权威 kind。
 // 存储侧不缓存目录结论，也不直连目录库；可见性规则只有 catalog 一处实现。
+//
+// 三种终局，第三种以前被折进第二种：目录说不可见 → 404 not_found；
+// 问不到目录服务（超时/连接失败/5xx/熔断打开）→ 503 upstream_unavailable，并**当场写响应**。
+// 折在一起会让上游抖一下就等于"这个实体不存在"——文件从列表里静默消失，运维看不到故障。
+// 因此本函数负责写失败响应，调用方只需 if !ok { return }。
 func (h *Handler) visibleEntity(c *gin.Context, entityID string) (string, bool) {
 	if _, err := uuid.Parse(entityID); err != nil {
+		fail(c, http.StatusNotFound, "not_found")
 		return "", false
 	}
 	bearer, cookie := h.credentials(c)
-	kind, ok := h.catalog.Visible(c.Request.Context(), entityID, bearer, cookie)
-	if !ok {
+	kind, err := h.catalog.Visible(c.Request.Context(), entityID, bearer, cookie)
+	if err == nil {
+		return kind, true
+	}
+	if errors.Is(err, catalog.ErrNotVisible) {
+		fail(c, http.StatusNotFound, "not_found")
 		return "", false
 	}
-	return kind, true
+	h.log.Printf("storage: 实体 %s 可见性问不到目录服务，回 503 %s: %v", entityID, upstream.CodeUpstreamUnavailable, err)
+	fail(c, http.StatusServiceUnavailable, upstream.CodeUpstreamUnavailable)
+	return "", false
 }
 
 func normalizeRole(role string) string {
@@ -221,7 +234,6 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 	if in.TargetEntityID != "" {
 		kind, ok := h.visibleEntity(c, in.TargetEntityID)
 		if !ok {
-			fail(c, 404, "not_found")
 			return
 		}
 		targetKind = kind
@@ -580,7 +592,6 @@ func (h *Handler) bind(c *gin.Context) {
 	h.auditAsset(c, asset, nil)
 	kind, ok := h.visibleEntity(c, in.TargetEntityID)
 	if !ok {
-		fail(c, 404, "not_found")
 		return
 	}
 	if in.TargetEntityType != "" && !strings.EqualFold(in.TargetEntityType, kind) {

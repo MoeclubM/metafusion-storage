@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 )
 
 // 存量不透明会话令牌的兜底必须问账号服务（会话表在它那里）：
@@ -25,7 +24,7 @@ func TestSessionClientResolvesThroughAccountService(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewSessionClient(srv.URL, 2*time.Second)
+	c := NewSessionClient(srv.URL)
 	p, ok := c.Resolve(context.Background(), "opaque-token", "cookie-token")
 	if !ok || p == nil || p.ID != "u-1" || p.Role != "editor" {
 		t.Fatalf("身份解析失败: %v %+v", ok, p)
@@ -45,7 +44,7 @@ func TestSessionClientResolvesThroughAccountService(t *testing.T) {
 
 // 未配置账号服务地址时不做任何请求（身份只认 JWT），也不会误判为已登录。
 func TestSessionClientWithoutBaseIsInert(t *testing.T) {
-	c := NewSessionClient("", time.Second)
+	c := NewSessionClient("")
 	if _, ok := c.Resolve(context.Background(), "t", ""); ok {
 		t.Fatal("空地址不应解析出身份")
 	}
