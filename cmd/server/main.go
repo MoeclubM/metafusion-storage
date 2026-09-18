@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/MoeclubM/metafusion-storage/internal/audit"
 	"github.com/MoeclubM/metafusion-storage/internal/auth"
 	"github.com/MoeclubM/metafusion-storage/internal/catalog"
 	"github.com/MoeclubM/metafusion-storage/internal/config"
@@ -49,6 +50,16 @@ func main() {
 	if err = db.Init(ctx); err != nil {
 		log.Fatalf("storage schema initialization failed: %v", err)
 	}
+	// 审计留痕（契约 docs/architecture/audit-log.md）：记录器自带后台 goroutine 与有界队列；
+	// 它必须在 db.Close() 之前关（defer 是后进先出，这里的 defer 排在 db.Close 之后注册即先执行），
+	// 否则退出时队列里最后几行会写到已关闭的库上。
+	recorder := audit.NewRecorder(db.DB(), audit.ServiceName)
+	defer func() {
+		recorder.Close()
+		if dropped := recorder.Dropped(); dropped > 0 {
+			log.Printf("storage: 审计留痕丢弃 %d 行（队列满或写库失败），见 audit_log 的缺口", dropped)
+		}
+	}()
 
 	objs, err := objects.New(ctx, cfg)
 	if err != nil {
@@ -90,7 +101,7 @@ func main() {
 		c.Next()
 	})
 
-	handler.New(db, objs, cat, verifier, cfg).Register(r)
+	handler.New(db, objs, cat, verifier, cfg).UseAudit(recorder).Register(r)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "live", "service": "metafusion-storage"})

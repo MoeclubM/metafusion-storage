@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/MoeclubM/metafusion-storage/internal/audit"
 	"github.com/MoeclubM/metafusion-storage/internal/auth"
 	"github.com/MoeclubM/metafusion-storage/internal/catalog"
 	"github.com/MoeclubM/metafusion-storage/internal/config"
@@ -37,6 +38,8 @@ type Handler struct {
 	verifier *auth.Verifier
 	cfg      config.Config
 	log      *log.Logger
+	// audit 是审计留痕记录器；nil 表示未接线（离线单测只挂路由、不写库）。见 UseAudit。
+	audit *audit.Recorder
 }
 
 func New(db *store.Store, objs *objects.Store, cat *catalog.Client, verifier *auth.Verifier, cfg config.Config) *Handler {
@@ -48,6 +51,8 @@ func New(db *store.Store, objs *objects.Store, cat *catalog.Client, verifier *au
 func (h *Handler) Register(r *gin.Engine) {
 	v := h.verifier
 	api := r.Group("/api/storage")
+	// 审计中间件挂在 api 组上、在路由注册之前（契约 §3）：只有注册表里登记了动作码的写路由才留痕。
+	api.Use(h.auditMiddleware())
 	{
 		api.POST("/upload/initiate", v.Required(), h.requireUpload(), h.initiateUpload)
 		api.POST("/upload/complete", v.Required(), h.requireUpload(), h.completeUpload)
@@ -65,6 +70,8 @@ func (h *Handler) Register(r *gin.Engine) {
 }
 
 func fail(c *gin.Context, status int, code string) {
+	// 审计中间件据此写 result=failure + error_code：错误码必须与响应体 error 字段一致（契约 §1）。
+	audit.Fail(c, code)
 	c.JSON(status, gin.H{"error": code})
 }
 
@@ -237,6 +244,7 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 	switch {
 	case err == nil && asset.Status == "complete":
 		resp := initiateResponse{IsInstantUpload: true, AssetID: asset.ID, ObjectKey: asset.ObjectKey, Asset: &asset}
+		h.auditAsset(c, asset, map[string]any{"is_instant_upload": true})
 		if in.TargetEntityID != "" {
 			b, berr := h.createBinding(ctx, asset.ID, in.TargetEntityID, targetKind, role, p.ID)
 			if berr != nil {
@@ -244,6 +252,7 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 				return
 			}
 			resp.Binding = &b
+			h.auditAsset(c, asset, map[string]any{"binding_id": b.ID, "binding_role": role, "target_entity_id": b.TargetEntityID})
 		}
 		c.JSON(200, resp)
 		return
@@ -259,6 +268,8 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 			fail(c, 503, "storage_unavailable")
 			return
 		}
+		// 续传/覆盖他人未完成的上传是跨用户处置：摘要里点出这次到底是不是替别人收尾。
+		h.auditAsset(c, asset, map[string]any{"resumed": true, "part_count": in.PartCount, "cross_user": asset.UploaderID != p.ID})
 		c.JSON(200, resp)
 		return
 	case !errors.Is(err, store.ErrNotFound):
@@ -285,6 +296,7 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 		fail(c, 503, "storage_unavailable")
 		return
 	}
+	h.auditAsset(c, asset, map[string]any{"created": true, "part_count": in.PartCount})
 	// 新建资产时若同时给了目标实体，绑定在直传完成前后都成立：
 	// 绑定只是"这份内容属于谁"，不依赖上传是否已落定。
 	if in.TargetEntityID != "" {
@@ -294,6 +306,7 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 			return
 		}
 		resp.Binding = &b
+		h.auditAsset(c, asset, map[string]any{"binding_id": b.ID, "binding_role": role, "target_entity_id": b.TargetEntityID})
 	}
 	c.JSON(200, resp)
 }
@@ -380,7 +393,10 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		fail(c, 403, "forbidden")
 		return
 	}
+	// 被动对象与"变更前"摘要在这一步就确定：回读不符、超限这些失败路径同样要能追到是哪份资产。
+	h.auditAsset(c, asset, nil)
 	if asset.Status == "complete" {
+		h.auditAsset(c, asset, map[string]any{"already_complete": true})
 		c.JSON(200, gin.H{"asset": asset, "already_complete": true})
 		return
 	}
@@ -402,6 +418,7 @@ func (h *Handler) completeUpload(c *gin.Context) {
 	if h.objects.Local() {
 		// 本地模式没有预签名直传：对象由 /upload/stream 边收边算摘要后落定，
 		// complete 只做幂等确认（该路径已在 streamUpload 里验过摘要）。
+		h.auditAsset(c, asset, map[string]any{"object_mode": "local", "confirmed": true})
 		c.JSON(200, gin.H{"asset": asset})
 		return
 	}
@@ -439,10 +456,13 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
+	before := asset.Status
 	asset.Status = "complete"
 	asset.SizeBytes = read
 	asset.HashVerified = true
 	h.log.Printf("storage: asset %s 回读校验通过 sha256=%s size=%d elapsed=%s", asset.ID, digest, read, time.Since(started))
+	audit.Describe(c, audit.Detail{TargetType: "asset", TargetID: asset.ID,
+		Changes: assetTransition(before, asset, map[string]any{"verified_size_bytes": read})})
 	c.JSON(200, gin.H{"asset": asset})
 }
 
@@ -484,6 +504,7 @@ func (h *Handler) streamUpload(c *gin.Context) {
 		fail(c, 403, "forbidden")
 		return
 	}
+	h.auditAsset(c, asset, nil)
 	// 单列一档上限而不是复用 JSON 写接口的 2MB：这里收到的是原始文件字节，
 	// 大小由 STORAGE_MAX_UPLOAD_MB（默认 0 = 不限制，大文件优先）决定，
 	// 声明的大小在 initiate 与落定阶段另有校验。网关的 client_max_body_size 是 1G，
@@ -510,9 +531,13 @@ func (h *Handler) streamUpload(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
+	before := asset.Status
 	asset.Status = "complete"
 	asset.SizeBytes = size
 	asset.HashVerified = true
+	// 只记元数据：请求体是文件本身（可能上百 MB），审计绝不读它、也不放它的任何片段。
+	audit.Describe(c, audit.Detail{TargetType: "asset", TargetID: asset.ID,
+		Changes: assetTransition(before, asset, nil)})
 	c.JSON(200, gin.H{"asset": asset})
 }
 
@@ -547,6 +572,7 @@ func (h *Handler) bind(c *gin.Context) {
 		fail(c, 403, "forbidden")
 		return
 	}
+	h.auditAsset(c, asset, nil)
 	kind, ok := h.visibleEntity(c, in.TargetEntityID)
 	if !ok {
 		fail(c, 404, "not_found")
@@ -561,6 +587,13 @@ func (h *Handler) bind(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
+	audit.Describe(c, audit.Detail{TargetType: "binding", TargetID: b.ID, Changes: map[string]any{
+		"asset_id":         asset.ID,
+		"sha256":           asset.SHA256,
+		"target_entity_id": b.TargetEntityID,
+		"target_kind":      b.TargetKind,
+		"binding_role":     b.BindingRole,
+	}})
 	c.JSON(200, gin.H{"binding": b})
 }
 
@@ -590,9 +623,18 @@ func (h *Handler) unbind(c *gin.Context) {
 		fail(c, 403, "forbidden")
 		return
 	}
+	// 快照在删除前取：审计要能回答"删掉的是哪一条关系"；被拒的尝试同样因此带上 target。
+	audit.Describe(c, audit.Detail{TargetType: "binding", TargetID: b.ID, Changes: map[string]any{
+		"asset_id":         b.AssetID,
+		"target_entity_id": b.TargetEntityID,
+		"target_kind":      b.TargetKind,
+		"binding_role":     b.BindingRole,
+		"created_by":       b.CreatedBy,
+	}})
 	if err = h.db.Unbind(ctx, b.ID); err != nil {
 		fail(c, 500, "module_error")
 		return
 	}
+	audit.Describe(c, audit.Detail{TargetType: "binding", TargetID: b.ID, Changes: map[string]any{"removed": true}})
 	c.JSON(200, gin.H{"ok": true})
 }
