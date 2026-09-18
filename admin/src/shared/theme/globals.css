@@ -9,7 +9,14 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=Noto+Serif+SC:wght@400;600;700&display=swap');
+/* 这里曾有一条指向 fonts.googleapis.com 的 @import（Inter / JetBrains Mono / Noto …）。
+   它从来没有生效过：postcss 把上面 @import "./theme.generated.css" 内联在本行之前，产出 CSS 里这条
+   远程 @import 落在规则中间，按 CSS 规范整条被浏览器忽略（旧产物实测：39815 字节里第 23694 字节处）。
+   Next 16 的 Turbopack 按规范拒绝这个位置（@import rules must precede all rules），构建直接失败，
+   故删除——这不是"取消字体"，而是把"本来就加载不到"写成显式事实。
+   tailwind.config.ts 的 fontFamily 仍保留系统字体兜底链（ui-sans-serif / -apple-system / Noto Sans SC …），
+   观感与升级前一致。确实要让这几个 Web 字体生效（管理台排版会随之变化）请照主站写法改用 next/font
+   自托管，单独一轮做，不要和版本升级混在一起。 */
 
 :root, [data-theme-mode="dark"], html.dark {
   --foreground-rgb: 240 243 246;
