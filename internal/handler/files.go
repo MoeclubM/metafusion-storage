@@ -110,9 +110,21 @@ func (h *Handler) assetContent(c *gin.Context) {
 		return
 	}
 	defer obj.Close()
-	c.Header("Content-Type", inlineMime(asset, obj))
-	// 内联而非 attachment：这个地址是给"展示"用的，attachment 会让浏览器另存而不是渲染。
-	c.Header("Content-Disposition", "inline")
+	// 类型与 disposition 都由服务端判定，不看调用方声明的用途：
+	//  1. 判定必须落在**最终下发的类型**上（登记值可能被扩展名或内容嗅探覆盖，见 inlineMime），
+	//     否则"声明 application/octet-stream、内容是 HTML"就能绕过白名单；
+	//  2. 白名单内（位图/音视频/纯文本/PDF 等）才 inline，其余一律 attachment —— 包括
+	//     text/html、image/svg+xml、application/xhtml+xml 这些会被当文档渲染的类型（审计 S-3）；
+	//  3. nosniff 对所有响应都发：白名单内的 text/plain 也不许浏览器嗅探成 HTML。
+	mimeType := inlineMime(asset, obj)
+	c.Header("Content-Type", mimeType)
+	c.Header("X-Content-Type-Options", "nosniff")
+	if inlineAllowed(mimeType) {
+		c.Header("Content-Disposition", "inline")
+	} else {
+		// 附件分支保留真实类型：下载到本地后系统仍能正确识别，收口靠 disposition + nosniff。
+		c.Header("Content-Disposition", contentDisposition(asset.FileName))
+	}
 	c.Header("Cache-Control", "private, max-age="+strconv.Itoa(contentCacheSeconds))
 	// 交给 ServeContent：Range 与 If-Modified-Since 由它处理，大文件不用整份读进内存。
 	http.ServeContent(c.Writer, c.Request, asset.FileName, time.Time{}, obj)
@@ -207,6 +219,9 @@ func (h *Handler) download(c *gin.Context) {
 	defer obj.Close()
 	c.Header("Content-Type", asset.MimeType)
 	c.Header("Content-Disposition", contentDisposition(asset.FileName))
+	// 下载口一直就是 attachment，这里补 nosniff：声明类型与实际内容不符时，
+	// 别给浏览器任何"按内容重新判定"的机会（对象存储模式那侧由 S3 直发，加不了头）。
+	c.Header("X-Content-Type-Options", "nosniff")
 	http.ServeContent(c.Writer, c.Request, asset.FileName, time.Time{}, obj)
 	_ = size
 }
