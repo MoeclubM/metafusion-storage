@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strings"
@@ -107,9 +108,14 @@ type Verifier struct {
 	// 带 mfp_ 前缀的请求一律 503 auth_unavailable——身份只能问账号服务。
 	pat *PATIntrospector
 
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	keys      map[string]*rsa.PublicKey
 	fetchedAt time.Time
+	// refreshMu 只用来串行化"出站刷新"：flight 非空表示已有一次刷新在飞行中，
+	// 等待者复用它的结果；flightErr 是最近一次飞行的结果。
+	refreshMu sync.Mutex
+	flight    chan struct{}
+	flightErr error
 }
 
 type claims struct {
@@ -214,32 +220,100 @@ func (v *Verifier) Verify(token string) (*Principal, error) {
 	return &Principal{ID: c.Subject, Username: c.Username, Role: c.Role, Groups: c.Groups, Permissions: c.Permissions}, nil
 }
 
+// publicKey 按 kid 取验签公钥：命中未过期缓存直接返回；TTL 过期或 kid 未知时刷新一次
+// （轮换期间签名密钥可能刚换过）。三条约束与目录/互动侧同构（2026-09-19 第二轮架构报告 #22）：
+//
+//  1. 出站请求不持缓存锁——JWKS 慢不会让本服务把请求堵在验签上；
+//  2. 同一时刻只允许一次出站刷新（并发未知 kid 共享结果），出站请求数有界；
+//  3. 刷新失败不直接判死：缓存里仍有该 kid 的公钥（TTL 过期也算——公钥本身没有有效期，
+//     TTL 只是"多久去确认一次轮换"）就继续用它验签并记告警。账号服务抖动超过 TTL 不该让
+//     本服务把所有已签发的有效令牌判成 401。
+//
+// 缓存里没有该 kid 时仍然 fail closed。
 func (v *Verifier) publicKey(kid string) (*rsa.PublicKey, error) {
 	if v.static != nil {
 		return v.static, nil
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if key, ok := v.keys[kid]; ok && time.Since(v.fetchedAt) < keyCacheTTL {
+	if key, ok := v.freshKey(kid); ok {
 		return key, nil
 	}
-	if err := v.refreshLocked(); err != nil {
+	if err := v.refreshJWKS(kid); err != nil {
+		if key, ok := v.cachedKey(kid); ok {
+			slog.Warn("storage: JWKS 刷新失败，回落到缓存公钥（可能错过一次轮换确认）", "kid", kid, "err", err.Error())
+			return key, nil
+		}
 		return nil, err
 	}
-	if key, ok := v.keys[kid]; ok {
-		return key, nil
-	}
-	// 轮换期间签名密钥可能刚换过：清空缓存再取一次。
-	if err := v.refreshLocked(); err != nil {
-		return nil, err
-	}
-	if key, ok := v.keys[kid]; ok {
+	if key, ok := v.cachedKey(kid); ok {
 		return key, nil
 	}
 	return nil, errors.New("unknown signing key")
 }
 
-func (v *Verifier) refreshLocked() error {
+// freshKey 返回缓存里命中且未过期的公钥。
+func (v *Verifier) freshKey(kid string) (*rsa.PublicKey, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if time.Since(v.fetchedAt) >= keyCacheTTL {
+		return nil, false
+	}
+	return lookupKey(v.keys, kid)
+}
+
+// cachedKey 返回缓存里该 kid 的公钥，不看是否过期：刷新失败时的回落来源。
+func (v *Verifier) cachedKey(kid string) (*rsa.PublicKey, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return lookupKey(v.keys, kid)
+}
+
+// lookupKey 按 kid 取键；只有一个密钥且令牌头没带 kid 时也命中（账号服务总是带 kid，这条只是容错）。
+func lookupKey(keys map[string]*rsa.PublicKey, kid string) (*rsa.PublicKey, bool) {
+	if key, ok := keys[kid]; ok {
+		return key, true
+	}
+	if kid == "" && len(keys) == 1 {
+		for _, key := range keys {
+			return key, true
+		}
+	}
+	return nil, false
+}
+
+// refreshJWKS 拉一次 JWKS。出站请求不持 mu；refreshMu + flight 让同一时刻只有一次出站请求，
+// 等待者复用同一次结果，不再各自打一次网络。未知 kid 强刷、命中缓存不刷的行为保持不变
+// （因此这里不再需要旧实现那次"再取一次"的额外出站）。
+func (v *Verifier) refreshJWKS(kid string) error {
+	v.refreshMu.Lock()
+	if ch := v.flight; ch != nil {
+		v.refreshMu.Unlock()
+		<-ch
+		v.refreshMu.Lock()
+		err := v.flightErr
+		v.refreshMu.Unlock()
+		return err
+	}
+	// 拿到刷新权时缓存可能刚被刷好：命中就直接复用，不必再打一次网络。
+	if key, ok := v.freshKey(kid); ok && key != nil {
+		v.refreshMu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	v.flight = ch
+	v.refreshMu.Unlock()
+
+	err := v.fetch()
+
+	v.refreshMu.Lock()
+	v.flightErr, v.flight = err, nil
+	v.refreshMu.Unlock()
+	close(ch)
+	return err
+}
+
+// fetch 拉取 JWKS 并整体替换缓存。非 200、解析失败或没有可用 RSA 公钥都算失败，
+// 此时旧缓存保持不动（publicKey 会按回落规则继续使用它）。出站期间不持 mu。
+func (v *Verifier) fetch() error {
 	if v.jwksURL == "" {
 		return errors.New("no jwks url")
 	}
@@ -280,8 +354,10 @@ func (v *Verifier) refreshLocked() error {
 	if len(keys) == 0 {
 		return errors.New("jwks has no usable key")
 	}
+	v.mu.Lock()
 	v.keys = keys
 	v.fetchedAt = time.Now()
+	v.mu.Unlock()
 	return nil
 }
 
