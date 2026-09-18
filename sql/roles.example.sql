@@ -20,13 +20,27 @@ $$;
 -- 因此需要库级 CREATE；schema 若已由运维预建，这条可以不给。
 GRANT CONNECT, CREATE ON DATABASE metafusion_db TO metafusion_storage;
 
--- 只授 storage schema：本服务的迁移与查询都只碰这里。
+-- 本服务的迁移与查询只碰 storage schema（审计表所在的 audit schema 见文件末尾的例外说明）。
 GRANT USAGE, CREATE ON SCHEMA storage TO metafusion_storage;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA storage TO metafusion_storage;
 GRANT SELECT, USAGE ON ALL SEQUENCES IN SCHEMA storage TO metafusion_storage;
 -- 迁移新增的表默认不带权限，所以默认权限也一并授出（服务自己的表自己用）。
 ALTER DEFAULT PRIVILEGES IN SCHEMA storage
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO metafusion_storage;
+
+-- 审计表例外：它在跨服务共用的 audit schema 里（契约 docs/architecture/audit-log.md），
+-- 谁先启动谁建表，本服务不一定建它——只授 storage schema 会让审计行全部写失败。
+-- 只给 USAGE + 本服务需要的 DML（SELECT/INSERT），不给 CREATE：建表靠上面的库级 CREATE。
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'audit') THEN
+    GRANT USAGE ON SCHEMA audit TO metafusion_storage;
+    GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA audit TO metafusion_storage;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA audit
+      GRANT SELECT, INSERT ON TABLES TO metafusion_storage;
+  END IF;
+END
+$$;
 
 -- 收回其它 schema 的权限：PUBLIC 对新建 schema 默认没有 USAGE，但历史实例可能被手工放过权。
 -- 撤掉 USAGE 后即使 schema 内的表有残留授权也访问不到，误写会立刻报 permission denied。

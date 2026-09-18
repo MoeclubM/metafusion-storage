@@ -146,7 +146,7 @@ go test ./... && go vet ./...
 
 ## 数据库结构与迁移
 
-表结构在 `internal/store/migrations/*.up.sql`（当前只有基线 `000001_init.up.sql`），
+表结构在 `internal/store/migrations/*.up.sql`（基线 `000001_init.up.sql` + 审计表 `000002_audit_log.up.sql`），
 由 `internal/store` 在启动时应用（`Init` → `Migrate`）；每个版本一个事务，
 DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, applied_at)`。
 
@@ -155,11 +155,36 @@ DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, 
   历史实例缺列（例如后补的 `fail_reason`）也由同一份文件补齐，不再另写"补丁迁移"；
 - 迁移期间取事务级 advisory lock（键 740204，与目录服务的 740202、账号服务的 740203 分开）：
   多副本同时启动时只让一个实例执行 DDL，其余实例等它提交后按账本空转；
+- 审计表在**跨服务共用的 `audit` schema**（不属于本服务的领域数据）：迁移文件里在同一事务内
+  另取跨服务建表锁 740205，与上面的 740204 是两把锁，不会互相顶掉；
 - 账本只记"这一版执行过"，不校验结构本身。手工删过表而账本还在时启动不会重建，
   这种情况删掉对应账本行（`DELETE FROM storage.schema_migrations WHERE version='000001_init'`）再重启。
 
 `sql/roles.example.sql` 是数据层隔离（B4）的准备件：给 `metafusion_storage` 角色**只授 `storage` schema**，
 **编排尚未启用**；手工执行该文件并把 `DATABASE_URL` 换成该角色即生效，代码侧不需要改动。
+审计表是例外：它在跨服务共用的 `audit` schema 里（可能由别的服务先建），因此该文件对 `audit`
+另授 `USAGE` + `SELECT, INSERT`，否则本服务的审计行会全部写失败（业务不受影响，但留痕静默缺失）。
+
+## 审计留痕
+
+写路由（`POST/PUT/PATCH/DELETE`）成功与失败都落一行到跨服务共用的 `audit.audit_log`
+（契约 `docs/architecture/audit-log.md`，本仓库实现在 `internal/audit`）。动作码按路由登记在
+`internal/handler/audit.go` 的 `auditActions`：
+
+| 路由 | 动作码 |
+| --- | --- |
+| `POST /api/storage/upload/initiate` | `asset.upload_initiated` |
+| `POST /api/storage/upload/complete` | `asset.upload_completed` |
+| `PUT /api/storage/upload/stream/:assetId` | `asset.upload_streamed` |
+| `POST /api/storage/bind` | `binding.created` |
+| `DELETE /api/storage/bindings/:id` | `binding.removed` |
+
+- `POST /api/storage/verify-hash` 是**刻意豁免**的写路由：它是读语义的探测与摘要回读校验，
+  且探测允许匿名，写审计等于给只读探测开一个刷表入口（理由写在 `auditExempt`，守卫测试要求非空）；
+- 写入是**非阻塞旁路**：队列满或落库失败只记日志、丢一行，绝不回滚业务写入；
+  流式上传只记元数据（assetId / sha256 / size / mime），不读也绝不落请求体；
+- 本服务**没有**审计读取端点：查询面在账号服务的 `GET /api/admin/audit-logs`；
+- 新增写端点必须同时登记动作码，否则 `TestWriteRoutesAreAudited`（遍历 gin 路由树）会失败。
 
 ## 测试
 
