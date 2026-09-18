@@ -27,43 +27,51 @@ const (
 	CredentialAnonymous = "anonymous"
 )
 
-// Schema 是契约 §1 的 DDL **逐字复制**（含 CREATE SCHEMA / advisory lock / 建表 / 建索引）。
+// Schema 是契约 §1 的 DDL 逐字复制（18 列 + 4 条索引），只多了一层**存在性守卫**：
+// 整段包在 DO 块里，先 to_regclass('audit.audit_log') 判表是否存在，不存在才建。
+//
+// 为什么必须守卫（部署实测踩到的坑，不是风格偏好）：PostgreSQL 的 CREATE INDEX IF NOT EXISTS
+// 会**先做表的所有权检查、再看索引是否已存在**，而 CREATE TABLE IF NOT EXISTS 只要求 schema 的 CREATE。
+// 审计表由部署时的角色（任务 A 的 mf_audit_owner）预建，四个服务的运行角色都不是它的 owner——
+// 旧版无条件执行 CREATE INDEX IF NOT EXISTS 的四个服务启动即 42501 must be owner of table audit_log，
+// 全部起不来；反过来不预建、让某一个服务先建，其余三个也全挂。守卫后表已存在的实例上是纯空转，
+// 不触发任何所有权检查（真实库负向验证见 internal/store 的 TestAuditDDLRequiresNoTableOwnership）。
 //
 // 它同时是迁移文件 internal/store/migrations/000002_audit_log.up.sql 的内容，
-// audit_schema_test.go 断言两者逐字相同：表结构只能有一份（迁移文件），
+// schema_test.go 断言两者逐字相同：表结构只能有一份（迁移文件），
 // 这里留一份是为了让"审计包自带契约"可读、也让形状断言不依赖数据库。
-const Schema = `-- 审计表跨服务共用：四个服务的业务 DDL 各管自己的 schema，这里单独用 audit schema，
--- 因为它不属于任何单个服务的领域数据（见 §5 的取舍说明）。
-CREATE SCHEMA IF NOT EXISTS audit;
-
--- 四个服务可能同时首次启动；建表用同一个 advisory 锁键（740205）串行化。
--- 一次 Exec 里的多条语句由 lib/pq 作为隐式事务批处理发送，xact 锁因此覆盖到建表结束。
-SELECT pg_advisory_xact_lock(740205);
-
-CREATE TABLE IF NOT EXISTS audit.audit_log (
-  id               uuid PRIMARY KEY,
-  occurred_at      timestamptz NOT NULL DEFAULT now(),
-  service          text NOT NULL,
-  action           text NOT NULL,
-  actor_user_id    uuid,
-  actor_username   text NOT NULL DEFAULT '',
-  credential_type  text NOT NULL DEFAULT '',
-  actor_ip         text NOT NULL DEFAULT '',
-  actor_user_agent text NOT NULL DEFAULT '',
-  target_type      text NOT NULL DEFAULT '',
-  target_id        text NOT NULL DEFAULT '',
-  changes          jsonb NOT NULL DEFAULT '{}'::jsonb,
-  result           text NOT NULL DEFAULT 'success' CHECK (result IN ('success','failure')),
-  error_code       text NOT NULL DEFAULT '',
-  request_method   text NOT NULL DEFAULT '',
-  route            text NOT NULL DEFAULT '',
-  http_status      int NOT NULL DEFAULT 0,
-  request_id       text NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS audit_log_occurred_at_idx ON audit.audit_log(occurred_at DESC);
-CREATE INDEX IF NOT EXISTS audit_log_service_action_idx ON audit.audit_log(service, action, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS audit_log_actor_idx ON audit.audit_log(actor_user_id, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS audit_log_target_idx ON audit.audit_log(target_type, target_id, occurred_at DESC);
+const Schema = `DO $audit_ddl$
+BEGIN
+  PERFORM pg_advisory_xact_lock(740205);
+  IF to_regclass('audit.audit_log') IS NULL THEN
+    CREATE SCHEMA IF NOT EXISTS audit;
+    CREATE TABLE audit.audit_log (
+      id               uuid PRIMARY KEY,
+      occurred_at      timestamptz NOT NULL DEFAULT now(),
+      service          text NOT NULL,
+      action           text NOT NULL,
+      actor_user_id    uuid,
+      actor_username   text NOT NULL DEFAULT '',
+      credential_type  text NOT NULL DEFAULT '',
+      actor_ip         text NOT NULL DEFAULT '',
+      actor_user_agent text NOT NULL DEFAULT '',
+      target_type      text NOT NULL DEFAULT '',
+      target_id        text NOT NULL DEFAULT '',
+      changes          jsonb NOT NULL DEFAULT '{}'::jsonb,
+      result           text NOT NULL DEFAULT 'success' CHECK (result IN ('success','failure')),
+      error_code       text NOT NULL DEFAULT '',
+      request_method   text NOT NULL DEFAULT '',
+      route            text NOT NULL DEFAULT '',
+      http_status      int NOT NULL DEFAULT 0,
+      request_id       text NOT NULL DEFAULT ''
+    );
+    CREATE INDEX audit_log_occurred_at_idx ON audit.audit_log(occurred_at DESC);
+    CREATE INDEX audit_log_service_action_idx ON audit.audit_log(service, action, occurred_at DESC);
+    CREATE INDEX audit_log_actor_idx ON audit.audit_log(actor_user_id, occurred_at DESC);
+    CREATE INDEX audit_log_target_idx ON audit.audit_log(target_type, target_id, occurred_at DESC);
+  END IF;
+END
+$audit_ddl$;
 `
 
 // Entry 是一条审计行。字段与契约 §1 的表列一一对应，顺序也一致（便于逐列核对）。
