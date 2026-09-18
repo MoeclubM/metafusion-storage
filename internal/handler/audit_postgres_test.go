@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,14 @@ type auditHarness struct {
 }
 
 func newAuditHarness(t *testing.T) *auditHarness {
+	t.Helper()
+	return newAuditHarnessWith(t, false)
+}
+
+// newAuditHarnessWith 允许注入一个"存在但不可用"的 PAT 内省器（baseURL 为空）：
+// 形态非法的 PAT 在本地就被判否（401 invalid_token），形态合法的 PAT 因账号服务未配置而 503
+// auth_unavailable——两条路径都不打外部网络，也不需要账号服务桩。
+func newAuditHarnessWith(t *testing.T, withPAT bool) *auditHarness {
 	t.Helper()
 	db := testutil.Database(t)
 	ctx := context.Background()
@@ -98,9 +107,14 @@ func newAuditHarness(t *testing.T) *auditHarness {
 		}
 	})
 
+	verifier := newVerifier(t, jwks.URL)
+	if withPAT {
+		verifier.SetPAT(auth.NewPATIntrospector(""))
+	}
+
 	gin.SetMode(gin.TestMode)
 	h.r = gin.New()
-	New(st, objs, catalog.New(cat.URL), newVerifier(t, jwks.URL), cfg).UseAudit(h.rec).Register(h.r)
+	New(st, objs, catalog.New(cat.URL), verifier, cfg).UseAudit(h.rec).Register(h.r)
 	return h
 }
 
@@ -542,4 +556,101 @@ func TestAuditLogAgainstPostgresGeneratesRequestID(t *testing.T) {
 	if row.requestID != generated {
 		t.Fatalf("审计行的 request_id 应是回写的那个: %q vs %q", row.requestID, generated)
 	}
+}
+
+// TestAuditLogAgainstPostgresAuthRejectedWrites：身份中间件（v.Required / v.Middleware）在审计中间件
+// 之后运行，因此**被它拒掉的写请求也留痕**——否则"伪造 PAT 打写接口"这类请求在库里完全没有痕迹。
+//
+// 这些响应由身份中间件用 AbortWithStatusJSON 直接写出（没走 handler.fail），所以 error_code 按契约回落
+// 成 http_<status>；actor 为空、credential_type=anonymous（身份没解析出来）；处理器没跑到，因此没有 target。
+func TestAuditLogAgainstPostgresAuthRejectedWrites(t *testing.T) {
+	h := newAuditHarnessWith(t, true)
+	payload, _ := json.Marshal(map[string]any{
+		"asset_id":         uuid.NewString(),
+		"target_entity_id": uuid.NewString(),
+		"binding_role":     "cover_image",
+	})
+
+	cases := []struct {
+		name       string
+		authHeader string // 空串表示完全不带 Authorization
+		wantStatus int
+		wantBody   string
+	}{
+		{"形态非法的 PAT", "Bearer mfp_short", http.StatusUnauthorized, auth.CodeInvalidToken},
+		{"形态合法但账号服务不可达", "Bearer mfp_" + strings.Repeat("A", 43), http.StatusServiceUnavailable, auth.CodeAuthUnavailable},
+		{"无效 JWT", "Bearer not.a.jwt", http.StatusUnauthorized, "authentication_required"},
+		{"完全没有凭据", "", http.StatusUnauthorized, "authentication_required"},
+	}
+
+	requestIDs := map[string]string{}
+	for _, tc := range cases {
+		id := h.requestID("auth-reject")
+		requestIDs[tc.name] = id
+		req := httptest.NewRequest(http.MethodPost, "/api/storage/bind", strings.NewReader(string(payload)))
+		req.Header.Set("Content-Type", "application/json")
+		if tc.authHeader != "" {
+			req.Header.Set("Authorization", tc.authHeader)
+		}
+		w := h.send(req, "", id)
+		if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantBody) {
+			t.Fatalf("%s：期望 %d %s，实际 %d %s", tc.name, tc.wantStatus, tc.wantBody, w.Code, w.Body.String())
+		}
+		assertRequestIDEcho(t, w, id)
+	}
+
+	h.rec.Close()
+
+	for _, tc := range cases {
+		// 恰好一行：身份拒掉的请求不能被重复留痕。
+		row := h.one(requestIDs[tc.name], "binding.created")
+		if row.result != "failure" {
+			t.Fatalf("%s：应记 failure，实际 %+v", tc.name, row)
+		}
+		wantCode := "http_" + strconv.Itoa(tc.wantStatus)
+		if row.errorCode != wantCode || row.httpStatus != tc.wantStatus {
+			t.Fatalf("%s：error_code 应回落 %s（响应就是它），实际 %q/%d", tc.name, wantCode, row.errorCode, row.httpStatus)
+		}
+		if row.credentialType != audit.CredentialAnonymous || row.actorUserID != "" || row.actorUsername != "" {
+			t.Fatalf("%s：身份没解析出来，应按匿名记，实际 %+v", tc.name, row)
+		}
+		if row.route != "/api/storage/bind" || row.requestMethod != http.MethodPost {
+			t.Fatalf("%s：路由模板/方法不符: %+v", tc.name, row)
+		}
+		if row.targetType != "" || row.targetID != "" {
+			t.Fatalf("%s：处理器没跑到，不该有 target: %+v", tc.name, row)
+		}
+		h.assertRowClean(row)
+	}
+}
+
+// TestAuditLogAgainstPostgresAuthRejectedWritesWithoutIntrospector 固定另一半口径：
+// 完全没有注入 PAT 内省器时（AUTH_URL 未配置），internal/auth 对任何 `mfp_` 前缀都按
+// "依赖不可用"返回，**形态非法的 PAT 也一样 503**（见 auth.go 的 introspectPAT 注释：身份只能问
+// 账号服务，问不到就不是"凭据错"）。这是既有口径、不是本次改动引入的，但它同样必须留痕。
+func TestAuditLogAgainstPostgresAuthRejectedWritesWithoutIntrospector(t *testing.T) {
+	h := newAuditHarness(t)
+	payload, _ := json.Marshal(map[string]any{
+		"asset_id":         uuid.NewString(),
+		"target_entity_id": uuid.NewString(),
+		"binding_role":     "cover_image",
+	})
+	id := h.requestID("auth-reject-no-introspector")
+	req := httptest.NewRequest(http.MethodPost, "/api/storage/bind", strings.NewReader(string(payload)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mfp_short")
+	w := h.send(req, "", id)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), auth.CodeAuthUnavailable) {
+		t.Fatalf("未配置内省器时任何 mfp_ 前缀都应按依赖不可用回 503，实际 %d %s", w.Code, w.Body.String())
+	}
+
+	h.rec.Close()
+	row := h.one(id, "binding.created")
+	if row.result != "failure" || row.errorCode != "http_503" || row.httpStatus != http.StatusServiceUnavailable {
+		t.Fatalf("应记 failure/http_503/503，实际 %+v", row)
+	}
+	if row.credentialType != audit.CredentialAnonymous || row.actorUserID != "" {
+		t.Fatalf("身份没解析出来，应按匿名记: %+v", row)
+	}
+	h.assertRowClean(row)
 }

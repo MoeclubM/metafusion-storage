@@ -52,6 +52,11 @@ func (h *Handler) Register(r *gin.Engine) {
 	v := h.verifier
 	api := r.Group("/api/storage")
 	// 审计中间件挂在 api 组上、在路由注册之前（契约 §3）：只有注册表里登记了动作码的写路由才留痕。
+	//
+	// 顺序是硬要求：组级中间件排在路由级中间件之前，因此审计总是先于身份中间件（v.Required / v.Middleware）
+	// 进入请求链——身份中间件 abort 掉的写请求（伪造/失效 PAT、账号服务不可达、无凭据）因此也留痕。
+	// 把审计挪到任何路由级中间件之后都会让这类请求静默消失（见 audit_postgres_test.go 的
+	// TestAuditLogAgainstPostgresAuthRejectedWrites）。
 	api.Use(h.auditMiddleware())
 	{
 		api.POST("/upload/initiate", v.Required(), h.requireUpload(), h.initiateUpload)
