@@ -85,6 +85,7 @@
   "errors.module_error": "服务端内部错误（module_error）：这一步在数据库或对象存储上失败了，稍后重试或看服务端日志。",
   "errors.network": "请求没有发出去或没有响应：{message}",
   "errors.not_found": "服务端回 404 not_found。",
+  "errors.object_missing": "对象的字节不在对象存储里（object_missing）：元数据还在，但这份内容已经取不回来了，重试无效。",
   "errors.storage_unavailable": "对象存储不可用（storage_unavailable）：对象读写这一步没成功。",
   "meta.description": "MetaFusion 存储域的运营面：用量总览、资产查询、绑定解绑。",
   "meta.title": "存储管理台 · MetaFusion",

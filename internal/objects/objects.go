@@ -57,6 +57,12 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 		verifyTimeout:  cfg.VerifyTimeout,
 	}
 	if cfg.S3Endpoint == "" {
+		// 端点为空即本地对象模式是隐式的：凭据配了而端点没配（键名拼错、漏注入、
+		// 编排改了变量名）会静默落到另一套存储上。两套存储都能启动成功，现象要等到
+		// 读旧对象时才出现，而且和"对象存储故障"长得一样。宁可在这里启动失败。
+		if cfg.S3AccessKey != "" || cfg.S3SecretKey != "" {
+			return nil, errors.New("STORAGE_S3_ENDPOINT 为空但已配置对象存储凭据：对象模式不明确，拒绝以本地模式启动")
+		}
 		s.local = true
 		return s, nil
 	}
@@ -315,6 +321,28 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadSeekCloser, int64,
 		return nil, 0, err
 	}
 	return obj, info.Size, nil
+}
+
+// IsObjectMissing 报告 err 是否表示"这个键上没有对象"，而不是对象存储不可用。
+//
+// 两者对外必须是两个结论：键上没有对象是数据缺失，重试、扩容、换端点都不会让它出现；
+// 对象存储/网络/凭据故障才是"暂时不可用"（503）。此前读失败一律按 storage_unavailable
+// 返回，于是"对象早就没了"与"对象存储挂了"在响应与告警里完全同形。
+func IsObjectMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 本地对象模式：键上没文件就是没这个对象。
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	// 对象存储侧只认"这个键不存在"。桶不存在（NoSuchBucket）与签名/权限错误
+	// 都是部署问题，不是数据缺失：它们按 503 报，才不会被当成"内容已丢"处理。
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		return resp.Code == "NoSuchKey" || resp.Code == "NoSuchObject"
+	}
+	return false
 }
 
 // HashOf 读回对象并计算 sha256（不带声明比对与上限），保留给"只看内容摘要"的调用方。

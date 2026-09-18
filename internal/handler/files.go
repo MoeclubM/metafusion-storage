@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/MoeclubM/metafusion-storage/internal/auth"
+	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
 )
 
@@ -78,6 +79,22 @@ func (h *Handler) getAsset(c *gin.Context) {
 	c.JSON(200, gin.H{"asset": asset, "bindings": bindings})
 }
 
+// objectReadFailed 把"读不到对象"翻成对外结论，并留下可排查的日志。
+//
+// 键上根本没有对象（数据缺失）与对象存储/网络故障是两件事：前者重试、扩容、换端点
+// 都不会让内容出现，后者才值得重试。以前两种都回 503 storage_unavailable，
+// 于是"这批文件早就不在了"在监控里长得和"对象存储挂了"一模一样，也解释不了
+// 为什么同一资源的元数据接口照常 200（元数据在库里，不碰对象存储）。
+func (h *Handler) objectReadFailed(c *gin.Context, asset store.Asset, err error) {
+	if objects.IsObjectMissing(err) {
+		h.log.Printf("storage: asset %s 的对象不在对象存储里 key=%s: %v", asset.ID, asset.ObjectKey, err)
+		fail(c, 404, "object_missing")
+		return
+	}
+	h.log.Printf("storage: asset %s 读对象失败 key=%s: %v", asset.ID, asset.ObjectKey, err)
+	fail(c, 503, "storage_unavailable")
+}
+
 // assetContent 按请求鉴权后**原样**把对象内容发给调用者：不转码、不裁剪、不改一个字节。
 //
 // 与 download 的分工是"稳定地址"与"一次性取件"：download 在对象存储模式下只回一个预签名地址，
@@ -106,7 +123,7 @@ func (h *Handler) assetContent(c *gin.Context) {
 	}
 	obj, size, err := h.objects.Open(ctx, asset.ObjectKey)
 	if err != nil {
-		fail(c, 503, "storage_unavailable")
+		h.objectReadFailed(c, asset, err)
 		return
 	}
 	defer obj.Close()
@@ -213,7 +230,7 @@ func (h *Handler) download(c *gin.Context) {
 	// 本地对象模式：没有可签名对象存储，直接由本服务流式下发。
 	obj, size, err := h.objects.Open(ctx, asset.ObjectKey)
 	if err != nil {
-		fail(c, 503, "storage_unavailable")
+		h.objectReadFailed(c, asset, err)
 		return
 	}
 	defer obj.Close()

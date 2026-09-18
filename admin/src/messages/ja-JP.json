@@ -85,6 +85,7 @@
   "errors.module_error": "サーバー内部エラー（module_error）。データベースまたはオブジェクトストレージ側で失敗しています。時間を置いて再試行するか、サーバーログを確認してください。",
   "errors.network": "リクエストを送信できないか応答がありません：{message}",
   "errors.not_found": "サーバーは 404 not_found を返しました。",
+  "errors.object_missing": "オブジェクトの実体がオブジェクトストレージにありません（object_missing）。メタデータは残っていますが、この内容はもう取得できず、再試行しても変わりません。",
   "errors.storage_unavailable": "オブジェクトストレージが利用できません（storage_unavailable）。読み書きに失敗しました。",
   "meta.description": "MetaFusion ストレージ領域の運用画面：使用量の概要、アセット照会、バインディング解除。",
   "meta.title": "ストレージ管理コンソール · MetaFusion",

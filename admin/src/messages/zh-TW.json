@@ -85,6 +85,7 @@
   "errors.module_error": "服務端內部錯誤（module_error）：這一步在資料庫或物件儲存上失敗了，稍後重試或看服務端日誌。",
   "errors.network": "請求沒有送出或沒有回應：{message}",
   "errors.not_found": "服務端回 404 not_found。",
+  "errors.object_missing": "物件的位元組不在物件儲存裡（object_missing）：中繼資料還在，但這份內容已經取不回來，重試無效。",
   "errors.storage_unavailable": "物件儲存不可用（storage_unavailable）：物件讀寫這一步沒成功。",
   "meta.description": "MetaFusion 儲存域的營運面：用量總覽、資產查詢、綁定解綁。",
   "meta.title": "儲存管理台 · MetaFusion",

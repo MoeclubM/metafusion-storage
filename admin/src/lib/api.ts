@@ -68,6 +68,9 @@ export function apiDelete<T>(path: string): Promise<T> {
 export function describeApiError(err: unknown, opts?: { notFound?: Message }): Message {
   if (err instanceof ApiError) {
     if (err.code === "authentication_required" || err.status === 401) return { key: "errors.authentication_required" };
+    // 这一条必须在 404 分支之前：object_missing 是 404，但它的语义是"元数据在、字节没了"，
+    // 与"没有这个资产"不同，混成一句会让运营以为换个 id 就能找到内容。
+    if (err.code === "object_missing") return { key: "errors.object_missing" };
     if (err.status === 404 || err.code === "not_found") return opts?.notFound ?? { key: "errors.not_found" };
     if (err.code === "forbidden" || err.status === 403) return { key: "errors.forbidden" };
     if (err.code === "module_error") return { key: "errors.module_error" };

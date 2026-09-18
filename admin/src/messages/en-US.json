@@ -85,6 +85,7 @@
   "errors.module_error": "Server-side failure (module_error): the database or object-storage step failed; retry later or check the server logs.",
   "errors.network": "The request could not be sent or got no response: {message}",
   "errors.not_found": "The server answered 404 not_found.",
+  "errors.object_missing": "The object's bytes are not in object storage (object_missing): the metadata is still there, but that content can no longer be fetched — retrying will not help.",
   "errors.storage_unavailable": "Object storage unavailable (storage_unavailable): the read/write step did not succeed.",
   "meta.description": "Operations for the MetaFusion storage domain: usage, asset lookup, binding removal.",
   "meta.title": "Storage Console · MetaFusion",
