@@ -80,6 +80,7 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8082` | 监听端口 |
+| `TRUSTED_PROXIES` | `127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` | 可信反向代理的 IP/CIDR 列表（逗号分隔）：只有对端落在列表里时 gin 才采信 `X-Forwarded-For`，否则 `ClientIP()` 回退 `RemoteAddr`。`none` 表示入口链上没有代理（服务被直接暴露）。非法项**拒绝启动**——静默退回"无可信代理"会让审计行的 `actor_ip` 全是网关容器地址、应用层限流退化成全站共享一个桶，而那种退化在功能上看不出异常 |
 | `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（本服务只使用 `storage` schema） |
 | `STORAGE_ROOT` | `./storage-data` | 本地对象模式根目录与直传暂存目录 |
 | `STORAGE_S3_ENDPOINT` | 空 | 为空即本地对象模式（无需 RustFS）；兼容旧名 `ARCHIVE_S3_ENDPOINT` |

@@ -13,6 +13,10 @@ import (
 // 拆分期两侧可以共用同一份 .env，不需要两套变量名。
 type Config struct {
 	Port string
+	// TrustedProxies 是可信反向代理的 IP/CIDR 列表（TRUSTED_PROXIES，逗号分隔）。
+	// 只有对端落在列表里时 gin 才采信 X-Forwarded-For，否则 ClientIP() 回退 RemoteAddr；
+	// 留空表示用 internal/nettrust 的保守默认（回环 + RFC1918 私网），"none" 表示入口无代理。
+	TrustedProxies string
 	// DatabaseURL 为 PostgreSQL 连接串；为空时用 DB_* 拼装。
 	DatabaseURL string
 	// Root 本地对象模式的根目录（也用于上传暂存）。
@@ -57,6 +61,7 @@ type Config struct {
 func Load() Config {
 	c := Config{
 		Port:             env("PORT", "8082"),
+		TrustedProxies:   env("TRUSTED_PROXIES", ""),
 		DatabaseURL:      env("DATABASE_URL", ""),
 		Root:             env("STORAGE_ROOT", env("ARCHIVE_PATH", "./storage-data")),
 		S3Endpoint:       env("STORAGE_S3_ENDPOINT", env("ARCHIVE_S3_ENDPOINT", "")),
