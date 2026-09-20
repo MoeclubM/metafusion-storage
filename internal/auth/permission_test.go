@@ -52,23 +52,63 @@ func TestCanGrantsWildcard(t *testing.T) {
 	}
 }
 
-// 老令牌兜底：没有 permissions 声明时，admin 仍可用；其余角色一律不放行
-// （拆分前也只有 role == admin 有额外权力，兜底不得放宽边界）。
+// 兼容：老令牌（缺 permissions 键、非第三方、非 PAT）仅保留上传历史边界（S01 已关闭 admin 兜底）。
+// S01 起审核码不再设 admin 兜底；上传码是收口前的“登录即可”，非 admin 角色仍可传（见 legacyOpenCodes）。
 func TestCanFallsBackToRoleForLegacyToken(t *testing.T) {
-	admin := &Principal{ID: "u1", Role: "admin"}
-	for _, code := range storagePermissionCodes {
-		if !admin.Can(code) {
-			t.Fatalf("老管理员令牌应放行 %s", code)
-		}
+	legacyAdmin := &Principal{ID: "u1", Role: "admin"}
+	if !legacyAdmin.Can(PermissionAssetUpload) {
+		t.Fatal("老令牌仍可上传：收口前上传只要求登录")
 	}
-	if admin.Can("catalog.entity.edit") {
-		t.Fatal("角色兜底只认本服务声明的码，不应放行目录侧的码")
+	if legacyAdmin.Can(PermissionAssetModerate) {
+		t.Fatal("S01 起老令牌的 admin 也不得凭角色放行审核码")
+	}
+	// 角色兜底只覆盖本服务声明的码，别的子系统的码不归存储判。
+	if legacyAdmin.Can("catalog.entity.edit") {
+		t.Fatal("历史兜底只认本服务声明的码，不应放行目录侧的码")
 	}
 	for _, role := range []string{"editor", "user", ""} {
 		p := &Principal{ID: "u2", Role: role}
-		if p.Can(PermissionAssetModerate) || p.Can(PermissionAssetUpload) {
-			t.Fatalf("老令牌角色 %q 不应获得存储权限", role)
+		if !p.Can(PermissionAssetUpload) {
+			t.Fatalf("老令牌角色 %q 仍可上传（收口前只要求登录）", role)
 		}
+		if p.Can(PermissionAssetModerate) {
+			t.Fatalf("老令牌角色 %q 不得放行审核码", role)
+		}
+	}
+}
+
+// S01：显式空权限（含空数组、PermissionsSet）不得回落 admin，即使角色是 admin。
+func TestCanDeniesExplicitEmptyAdmin(t *testing.T) {
+	explicitEmpty := &Principal{ID: "u-8", Role: "admin", Permissions: []string{}, PermissionsSet: true}
+	for _, code := range storagePermissionCodes {
+		if explicitEmpty.Can(code) {
+			t.Fatalf("显式空权限不得回落 admin：%s 不该放行", code)
+		}
+	}
+	nonNilEmpty := &Principal{ID: "u-9", Role: "admin", Permissions: []string{}}
+	if nonNilEmpty.Can(PermissionAssetModerate) || nonNilEmpty.Can(PermissionAssetUpload) {
+		t.Fatal("非 nil 空集合不得回落 admin")
+	}
+}
+
+// S01：第三方 OAuth 身份在治理码上直接不放行；上传码仍以码为准（空即不放行）。
+func TestCanDeniesThirdPartyGovernance(t *testing.T) {
+	thirdPartyAdmin := &Principal{
+		ID: "u-10", Role: "admin", Groups: []string{"admin"}, Permissions: []string{"*"},
+		Scope: "openid profile", ClientID: "third-party-app", IsThirdParty: true, PermissionsSet: true,
+	}
+	if thirdPartyAdmin.Can(PermissionAssetModerate) {
+		t.Fatal("第三方令牌不得放行审核码：即使带 * 通配")
+	}
+	thirdPartyUploader := &Principal{
+		ID: "u-11", Role: "user", Permissions: []string{PermissionAssetUpload},
+		Scope: "profile", ClientID: "third-party-app", IsThirdParty: true, PermissionsSet: true,
+	}
+	if !thirdPartyUploader.Can(PermissionAssetUpload) {
+		t.Fatal("第三方令牌的上传码仍以码为准：持有即放行")
+	}
+	if thirdPartyUploader.Can(PermissionAssetModerate) {
+		t.Fatal("第三方令牌未持有审核码不得放行")
 	}
 }
 

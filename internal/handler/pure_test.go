@@ -27,7 +27,7 @@ func TestNormalizeRole(t *testing.T) {
 }
 
 // 只有上传者本人或持 storage.asset.moderate 的审核者可以完成/绑定/解绑文件。
-// 拆分前的对应边界是"上传者本人或 role == admin"，这里逐条对齐，不放宽也不收紧。
+// S01 起老令牌不再凭 admin 角色管理他人文件（审核码无角色兜底），仅保留历史上传边界。
 func TestCanManageAsset(t *testing.T) {
 	owner := &auth.Principal{ID: "u1", Role: "user"}
 	moderator := &auth.Principal{ID: "u2", Role: "user", Permissions: []string{"storage.asset.moderate"}}
@@ -40,8 +40,11 @@ func TestCanManageAsset(t *testing.T) {
 	if !canManageAsset(moderator, "u1") {
 		t.Fatal("持 storage.asset.moderate 的成员应可管理他人文件")
 	}
-	if !canManageAsset(legacyAdmin, "u1") {
-		t.Fatal("老令牌（无 permissions）的管理员应仍可管理他人文件")
+	if canManageAsset(legacyAdmin, "u1") {
+		t.Fatal("S01 起老令牌的 admin 也不得凭角色管理他人文件")
+	}
+	if !legacyAdmin.Can(auth.PermissionAssetUpload) {
+		t.Fatal("老令牌仍保留历史上传边界")
 	}
 	if canManageAsset(revokedAdmin, "u1") {
 		t.Fatal("后台收回权限组后，admin 角色不得再管理他人文件")

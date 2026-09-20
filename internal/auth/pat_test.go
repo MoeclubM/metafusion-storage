@@ -293,11 +293,14 @@ func TestPATPrincipalNeverFallsBackToRole(t *testing.T) {
 			t.Fatalf("HasPermission 对空权限的 PAT 不该放行 %s", code)
 		}
 	}
-	// 对照：同角色的**老令牌**（没有 permissions 声明、不是 PAT）仍按历史角色兜底——
-	// 这条差异是有意的，不能顺手把老令牌也收紧。
+	// 对照：同角色的**老令牌**（缺 permissions 键、不是 PAT）仅保留历史上传边界——
+	// S01 起审核码不再设 admin 兜底，这条差异是有意的，不能顺手把老令牌的上传也收紧。
 	legacy := &Principal{ID: "u-2", Role: "admin"}
-	if !legacy.Can(PermissionAssetModerate) {
-		t.Fatal("老令牌的 admin 角色兜底必须保持")
+	if !legacy.Can(PermissionAssetUpload) {
+		t.Fatal("老令牌的历史上传边界必须保持")
+	}
+	if legacy.Can(PermissionAssetModerate) {
+		t.Fatal("S01 起老令牌的 admin 也不得放行审核码")
 	}
 	if legacy.HasPermission(PermissionAssetModerate) {
 		t.Fatal("HasPermission 不对任何角色兜底：老令牌也不该在空 permissions 上放行")

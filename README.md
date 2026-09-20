@@ -68,8 +68,8 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 
 授权以账号服务下发的权限码为准（访问令牌的 `permissions` 声明，或 `GET /api/auth/me`），
 集中判定在 `internal/auth/permission.go` 的 `Principal.Can`：码优先（`*` 通配即全权），
-**令牌没带 `permissions` 时按历史角色兜底**（`admin` 放行本服务全部码，其余角色不放行），
-因此老令牌与尚未配置权限组的实例不会被拒。
+**缺 `permissions` 键的老令牌仅保留历史上传边界**（上传仍可，审核不再凭 `admin` 角色放行）；
+**显式空权限不再回落**，第三方 OAuth 令牌默认拒绝治理码（S01，见 `internal/auth/permission.go`）。
 
 | 码 | 含义 | 当前覆盖 |
 | --- | --- | --- |

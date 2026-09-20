@@ -18,10 +18,10 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/store"
 )
 
-// 上传与绑定按 storage.asset.upload 收口：登录且持有该码才进得了处理器，缺码一律 403 forbidden。
-// 三个"看起来够用"的令牌都必须被拒——老令牌的 editor、只有论坛码的成员、以及**只有
-// storage.asset.moderate 的审核者**：两个码是两件事（创建并登记自己的东西 vs 处置他人的东西），
-// 互不蕴含，审核权不能代替上传权。
+// 上传与绑定按 storage.asset.upload 收口：持码才进得了处理器，缺码一律 403 forbidden。
+// “看起来够用”但必须被拒的：只有论坛码的成员、只有 moderate 的审核者、后台收回上传码的旧 admin——
+// 两个码互不蕴含，审核权不能代替上传权。
+// S01：老令牌（缺 permissions 键）按历史上传边界兼容，直接放行到处理器（见放行清单）。
 // 拒绝发生在触碰数据库之前，空库（&store.Store{}）足够判定；放行判据用"处理器给的 400"，
 // 因为空载荷在闸门之后才会被校验。
 func TestUploadRequiresUploadPermission(t *testing.T) {
@@ -48,7 +48,6 @@ func TestUploadRequiresUploadPermission(t *testing.T) {
 		role  string
 		perms []string
 	}{
-		{"老令牌的 editor（无权限码）", "editor", nil},
 		{"只有论坛码的成员", "user", []string{"community.post.create"}},
 		{"只有审核权（moderate）", "user", []string{auth.PermissionAssetModerate}},
 		{"后台收回上传码、role 仍是 admin", "admin", []string{auth.PermissionAssetModerate}},
@@ -75,6 +74,7 @@ func TestUploadRequiresUploadPermission(t *testing.T) {
 		role  string
 		perms []string
 	}{
+		{"老令牌按历史上传边界兼容（无权限码）", "editor", nil},
 		{"member 组默认持有的上传码", "user", []string{"community.post.create", auth.PermissionAssetUpload}},
 		{"* 通配（admin 组）", "admin", []string{"*"}},
 	}

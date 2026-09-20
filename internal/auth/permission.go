@@ -1,6 +1,6 @@
 package auth
 
-// 存储侧授权的集中判定：以权限码为准，角色只在老令牌上兜底。
+// 存储侧授权的集中判定：以权限码为准（S01：显式空权限不回落 admin，治理 API 默认拒第三方）。
 //
 // 权限码由账号服务（metafusion-auth）装进权限组并随访问令牌的 `permissions` 声明
 // 与 /api/auth/me 下发（admin 组带 `*` 通配）。码名必须与账号服务的权限清单逐字一致：
@@ -27,7 +27,8 @@ const (
 	//
 	// 为什么可以收口：账号服务把本码播进 member 组（任何登录用户默认持有）并对存量实例做
 	// 只增不改的回填，因此两侧同批上线后成员照常上传；实例要收紧时从 member 组移除该码即可，
-	// 老令牌（无 permissions 声明）仍按历史角色兜底，不会因为升级突然失去上传能力。
+	// 老令牌（缺 permissions 键）按历史上传边界兼容（legacyOpenCodes），不会因为升级突然失去上传能力；
+	// 显式空集合（PermissionsSet）不再回落，见 Can。
 	PermissionAssetUpload = "storage.asset.upload"
 
 	// PermissionAssetModerate 审核资源：处置他人的资产（完成合并、流式接收、绑定、
@@ -39,9 +40,18 @@ const (
 	permissionWildcard = "*"
 )
 
-// storagePermissionCodes 是本服务声明的全部存储权限码：角色兜底只认这些码，
+// storagePermissionCodes 是本服务声明的全部存储权限码：历史兜底（仅 legacyOpenCodes）
 // 不会因为角色是 admin 就放行别的子系统的码（catalog.* / community.* / auth.* 归各自服务）。
 var storagePermissionCodes = []string{PermissionAssetUpload, PermissionAssetModerate}
+
+// legacyOpenCodes 是老令牌（缺 permissions 键、非第三方、非 PAT）仍然放行的码。
+//
+// 只有上传码在这一列：在它成为闸门之前，上传**只要求登录**，任何已登录用户
+// 都能传。账号服务尚未升级、令牌还不带 permissions 的实例如果按“角色兜底只认 admin”处理，
+// 就会变成“除了管理员谁都不能上传”——那是把兼容策略做成了故障。
+// 审核码不在此列：S01 起不再设 admin 角色兜底——会话登录令牌本就带权限组，
+// 老 JWT 窗口最长 15 分钟，续期/兜底都会补齐权限。
+var legacyOpenCodes = []string{PermissionAssetUpload}
 
 // HasPermission 是**纯权限码集合判定**：只看 permissions 里的码（* 通配即全权），
 // 不做任何角色兜底。PAT 身份（FromPAT）一律走它——PAT 的权限集合可能为空
@@ -63,8 +73,8 @@ func (p *Principal) HasPermission(code string) bool {
 // 令牌带 permissions 时一律以码为准（`*` 通配即全权）：拆服务后这是唯一的授权来源，
 // 此时角色不再额外放行，否则「角色兜底」会变成绕过权限组的后门——
 // 管理员在后台收回权限组后，本服务必须跟着不认。
-// 只有令牌完全没有 permissions 声明时（老令牌，或尚未按权限组配置的实例）才按历史角色兜底：
-// admin 放行全部存储码，其余角色一律不放行；与拆分前「只有 admin 有额外权力」逐条对应。
+// 只有令牌完全没有 permissions 声明时（缺 permissions 键的老令牌，或尚未按权限组配置的实例）
+// 才按历史上传边界兜底：上传码见 legacyOpenCodes（收口前就是“登录即可”）；审核码不再设 admin 兜底。
 //
 // FromPAT（身份来自 PAT 内省）时**永不**回落到角色兜底：PAT 的权限就是账号服务算好的
 // "用户自身权限 ∩ scopes"，scopes 空时就是空。若把它当"没有 permissions 声明"处理，
@@ -73,10 +83,22 @@ func (p *Principal) Can(code string) bool {
 	if p == nil {
 		return false
 	}
-	if len(p.Permissions) > 0 || p.FromPAT {
+	if p.IsThirdParty && isGovernanceCode(code) {
+		return false
+	}
+	if p.PermissionsSet || p.Permissions != nil || len(p.Permissions) > 0 || p.FromPAT || p.IsThirdParty {
 		return p.HasPermission(code)
 	}
-	return p.Role == "admin" && containsCode(storagePermissionCodes, code)
+	return containsCode(legacyOpenCodes, code)
+}
+
+// isGovernanceCode 报告是否为治理类（管理）权限码：上传（storage.asset.upload）是用户
+// 行为，不在此列；其余本服务声明的码都是管理动作，第三方令牌默认拒绝。
+func isGovernanceCode(code string) bool {
+	if code == PermissionAssetUpload {
+		return false
+	}
+	return containsCode(storagePermissionCodes, code)
 }
 
 // containsCode 只在本服务声明的码集合里做线性查找（两个码，不值得建 map）。

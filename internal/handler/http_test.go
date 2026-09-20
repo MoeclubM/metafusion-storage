@@ -158,7 +158,7 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 		t.Fatalf("令牌里的 storage.asset.moderate 未被认账: %+v", got)
 	}
 
-	// 老令牌（无 groups/permissions）：admin 角色仍可用，语义与拆分前一致。
+	// 老令牌（无 groups/permissions）：admin 角色仅保留历史上传边界，治理码不再凭角色放行（S01）。
 	req = httptest.NewRequest(http.MethodGet, "/api/probe", nil)
 	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "admin"))
 	w = httptest.NewRecorder()
@@ -173,8 +173,8 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 		Moderate bool     `json:"moderate"`
 	}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
-	if got.Role != "admin" || !got.Moderate {
-		t.Fatalf("老令牌身份还原不符: %+v", got)
+	if got.Role != "admin" || got.Moderate {
+		t.Fatalf("S01 起老令牌不再凭 admin 放行治理码: %+v", got)
 	}
 }
 
