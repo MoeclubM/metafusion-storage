@@ -260,6 +260,16 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 	}
 	switch {
 	case err == nil && asset.Status == "complete":
+		// S02 复用门禁（与 verify-hash/下载/独立 bind 同一口径，字节去重与授权分开）：
+		// 先查可读性，无权命中统一 404（不返他人元数据，上游故障则 503），摘要不做授权凭证；
+		// 再查再绑定权限，新增绑定需所有者/审核（与 bind 一致），可读仅允许秒传元数据复用。
+		if h.denyUnreadable(c, asset) {
+			return
+		}
+		if in.TargetEntityID != "" && !canManageAsset(p, asset.UploaderID) {
+			fail(c, 403, "forbidden")
+			return
+		}
 		resp := initiateResponse{IsInstantUpload: true, AssetID: asset.ID, ObjectKey: asset.ObjectKey, Asset: &asset}
 		h.auditAsset(c, asset, map[string]any{"is_instant_upload": true})
 		if in.TargetEntityID != "" {
@@ -583,6 +593,11 @@ func (h *Handler) bind(c *gin.Context) {
 	}
 	if err != nil {
 		fail(c, 500, "module_error")
+		return
+	}
+	// S02 绑定门禁（与秒传复用同一口径）：先查可读性，不存在与无权统一 404 不探存在性；
+	// 再查所有者/审核，可读仅允许读，新增绑定仍需所有者/审核，避免摘要预言扩大访问。
+	if h.denyUnreadable(c, asset) {
 		return
 	}
 	if !canManageAsset(p, asset.UploaderID) {
