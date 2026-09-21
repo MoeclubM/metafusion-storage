@@ -19,6 +19,7 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/catalog"
 	"github.com/MoeclubM/metafusion-storage/internal/config"
 	"github.com/MoeclubM/metafusion-storage/internal/handler"
+	"github.com/MoeclubM/metafusion-storage/internal/maintenance"
 	"github.com/MoeclubM/metafusion-storage/internal/nettrust"
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
@@ -38,6 +39,26 @@ func humanDuration(d time.Duration) string {
 		return "unlimited"
 	}
 	return d.String()
+}
+
+// runWorker 以后台任务模式运行一次：过期上传回收 + 双向对账。退出码 0 表示两项
+// 都跑完（明细在日志里）；非 0 表示顶层失败（库/对象不可用），触发器应告警而不是静默跳过。
+func runWorker(ctx context.Context, db *store.Store, objs *objects.Store, cfg config.Config) int {
+	cleanup, err := maintenance.RunCleanup(ctx, db, objs, cfg)
+	if err != nil {
+		log.Printf("storage worker: cleanup failed: %v", err)
+		return 1
+	}
+	log.Printf("storage worker: cleanup candidates=%d reclaimed=%d shared_rows=%d already_missing=%d skipped_bound=%d key_mismatch=%d errors=%d",
+		cleanup.Candidates, cleanup.Reclaimed, cleanup.SharedRowsRemoved, cleanup.ObjectAlreadyMissing, cleanup.SkippedBound, cleanup.SkippedKeyMismatch, cleanup.ObjectErrors)
+	recon, err := maintenance.RunReconcile(ctx, db, objs, cfg)
+	if err != nil {
+		log.Printf("storage worker: reconcile failed: %v", err)
+		return 1
+	}
+	log.Printf("storage worker: reconcile checked=%d missing=%d marked_blocked=%d marking_aborted=%v read_errors=%d orphans_seen=%d quarantined=%d quarantine_errors=%d",
+		recon.CheckedComplete, len(recon.MissingAssetIDs), recon.MarkedBlocked, recon.MarkingAborted, recon.ReadErrors, recon.OrphansSeen, recon.OrphansQuarantined, recon.QuarantineErrors)
+	return 0
 }
 
 // upstreamReadyURL 把上游基址拼成深探针地址；未配置地址返回空串——
@@ -86,6 +107,14 @@ func main() {
 	// 只写在环境变量里的话，"为什么这份对象被判 hash_verify_too_large"要靠猜。
 	log.Printf("upload hash verification: max object size %s, read-back timeout %s",
 		humanBytes(objs.VerifyMaxBytes()), humanDuration(objs.VerifyTimeout()))
+	// worker 模式：同一个可执行程序的后台任务入口（清理 + 对账），跑一次就退出，
+	// 由 cron/systemd timer 周期触发。不是新服务，不开端口、不注册路由。
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		if code := runWorker(ctx, db, objs, cfg); code != 0 {
+			os.Exit(code)
+		}
+		return
+	}
 
 	cat := catalog.New(cfg.CatalogURL)
 	verifier, err := auth.New(cfg)
