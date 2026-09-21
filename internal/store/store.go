@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	// 空导入只为注册 postgres 驱动：漏掉它时 sql.Open("postgres", …) 会直接报 unknown driver，
@@ -208,10 +210,35 @@ func (s *Store) Unbind(ctx context.Context, id string) error {
 
 // BindingsForEntity 列出挂在某个实体上的全部文件；调用方需先确认实体对请求者可见。
 func (s *Store) BindingsForEntity(ctx context.Context, entityID string) ([]FileBinding, error) {
+	return s.BindingsForEntityIDs(ctx, []string{entityID})
+}
+
+// BindingsForEntityIDs 按一批实体 ID 列出挂载文件（X01 读聚合：请求 ID + 存活身份，
+// 含历史别名；调用方需先确认请求实体对请求者可见）。
+// 空集合直接返回空（不拼非法 SQL）；上限 500 与单 ID 口径一致，多 ID 共享该上限。
+func (s *Store) BindingsForEntityIDs(ctx context.Context, entityIDs []string) ([]FileBinding, error) {
+	ids := []string{}
+	seen := map[string]bool{}
+	for _, id := range entityIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return []FileBinding{}, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "$" + strconv.Itoa(i+1)
+		args[i] = id
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT b.id,b.asset_id,b.target_entity_id,b.target_kind,b.binding_role,b.created_by,b.created_at,
 		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.fail_reason,a.uploader_id,a.created_at,a.completed_at
 		FROM storage.bindings b JOIN storage.assets a ON a.id=b.asset_id
-		WHERE b.target_entity_id=$1 ORDER BY b.created_at DESC LIMIT 500`, entityID)
+		WHERE b.target_entity_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY b.created_at DESC LIMIT 500`, args...)
 	if err != nil {
 		return nil, err
 	}

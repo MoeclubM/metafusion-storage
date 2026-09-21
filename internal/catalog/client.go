@@ -85,6 +85,121 @@ func (c *Client) Visible(ctx context.Context, entityID, bearer, cookie string) (
 	return kind, nil
 }
 
+// IdentityResolution 是目录侧统一身份解析契约（X01）的本地投影：canonical_id 为存活身份，
+// aliases 为请求链上经过的历史别名（GET /api/catalog/entities/{id}/identity，见目录
+// lifecycle.go 的 IdentityResolution）。目录补齐“canonical→全量历史别名”反向契约前，
+// aliases 只含正向链：读聚合先按“请求 ID + canonical 两 ID”兼容（见 AliasSet）。
+type IdentityResolution struct {
+	CanonicalID string   `json:"canonical_id"`
+	Aliases     []string `json:"aliases"`
+	Entity      struct {
+		ID   string `json:"id"`
+		Kind string `json:"kind"`
+	} `json:"entity"`
+}
+
+// Identity 问目录服务拿存活身份与 kind（X01 身份契约的只读投影，不改写任何引用）。
+//
+// 目录已合入 identity 端点时一次请求拿到 canonical；未合入（identity 404）时按旧
+// /resolve 跟随合并重定向——两种路径都返回“请求 ID 对应的存活身份”。
+// error 非 nil 时不能当成“不可见”：只有 errors.Is(err, ErrNotVisible) 是目录服务的明确结论，
+// 其余错误表示问不到上游，调用方必须回 503 而不是空列表。
+func (c *Client) Identity(ctx context.Context, entityID, bearer, cookie string) (IdentityResolution, error) {
+	var zero IdentityResolution
+	if c.base == "" || entityID == "" {
+		return zero, ErrNotVisible
+	}
+	header := http.Header{}
+	c.decorate(header, bearer, cookie)
+	resp, err := c.up.Do(ctx, upstream.Request{
+		Method: http.MethodGet,
+		URL:    c.base + "/api/catalog/entities/" + entityID + "/identity",
+		Header: header,
+	})
+	if err != nil {
+		return zero, err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		var v IdentityResolution
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			return zero, fmt.Errorf("catalog identity %s: 响应无法解析: %w", entityID, err)
+		}
+		if v.CanonicalID == "" || v.Entity.ID == "" {
+			return zero, fmt.Errorf("catalog identity %s: 响应缺 canonical", entityID)
+		}
+		return v, nil
+	case resp.StatusCode == http.StatusNotFound:
+		// 身份端点不存在（旧目录）或实体不可见：走旧 /resolve 路径再判一次，
+		// 不在这里直接报不可见——旧目录对一切 id 的 identity 都是 404。
+		return c.identityViaResolve(ctx, entityID, bearer, cookie)
+	default:
+		return zero, fmt.Errorf("catalog identity %s: status %d", entityID, resp.StatusCode)
+	}
+}
+
+// identityViaResolve 是 identity 端点缺失时的旧路径：本体可见即自身为存活身份，
+// 否则跟随 /resolve 取合并后的存活身份与 kind（与 Visible 同口径，另取回 id）。
+func (c *Client) identityViaResolve(ctx context.Context, entityID, bearer, cookie string) (IdentityResolution, error) {
+	var zero IdentityResolution
+	kind, ok, err := c.fetchKind(ctx, entityID, bearer, cookie)
+	if err != nil {
+		return zero, err
+	}
+	if ok {
+		zero.CanonicalID, zero.Entity.ID, zero.Entity.Kind = entityID, entityID, kind
+		return zero, nil
+	}
+	header := http.Header{}
+	c.decorate(header, bearer, cookie)
+	resp, err := c.up.Do(ctx, upstream.Request{
+		Method: http.MethodGet,
+		URL:    c.base + "/api/catalog/entities/" + entityID + "/resolve",
+		Header: header,
+	})
+	if err != nil {
+		return zero, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return zero, ErrNotVisible
+	}
+	var entity struct {
+		ID   string `json:"id"`
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entity); err != nil {
+		return zero, fmt.Errorf("catalog entity %s/resolve: 响应无法解析: %w", entityID, err)
+	}
+	if entity.ID == "" {
+		return zero, fmt.Errorf("catalog entity %s/resolve: 响应缺 id", entityID)
+	}
+	zero.CanonicalID, zero.Entity.ID, zero.Entity.Kind = entity.ID, entity.ID, entity.Kind
+	if entity.ID != entityID {
+		zero.Aliases = []string{entityID}
+	}
+	return zero, nil
+}
+
+// AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 全部请求 ID} 去重（与互动
+// internal/catalog/client.go:AliasSet 同一兼容口径）。
+// 这是 X01 的兼容实现：目录补齐“canonical→历史别名”反向契约前，反向（从存活身份 D
+// 找历史 A/B/C）无法枚举——读请求 ID（含正向链）正确，从存活身份读时历史行待回填。
+// 目录契约就绪后改这一处展开全别名即可，调用方不动。
+func AliasSet(canonical string, requested ...string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, id := range append(append([]string{}, requested...), canonical) {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 // fetchKind 取一次实体端点（suffix 为空即 GET /entities/{id}，为 /resolve 时跟随合并重定向）。
 // 第二个返回值是"目录服务明确回答了不可见/不存在"（非 200 的确定回答）；error 表示这次问不到上游。
 func (c *Client) fetchKind(ctx context.Context, path, bearer, cookie string) (string, bool, error) {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/MoeclubM/metafusion-storage/internal/auth"
+	"github.com/MoeclubM/metafusion-storage/internal/store"
 )
 
 // 绑定用途是有限字段码空间：空值走默认，非法码必须拒绝而不是静默落库。
@@ -54,6 +55,29 @@ func TestCanManageAsset(t *testing.T) {
 	}
 	if canManageAsset(nil, "u1") {
 		t.Fatal("匿名不应可管理文件")
+	}
+}
+
+// X01 读聚合去重：多 ID 查询回来的同一绑定只保留一次；挂在新旧两 ID 上的
+// 两条绑定是两行事实，不合并（A→C、B→C、C→D 从 D 读到全部且无重复即靠它守住形状）。
+func TestDedupeFileBindings(t *testing.T) {
+	mk := func(bindingID, target string) store.FileBinding {
+		return store.FileBinding{Binding: store.Binding{ID: bindingID, AssetID: "asset-" + bindingID, TargetEntityID: target}}
+	}
+	in := []store.FileBinding{mk("b1", "a"), mk("b2", "c"), mk("b1", "a"), mk("b3", "c")}
+	got := dedupeFileBindings(in)
+	if len(got) != 3 {
+		t.Fatalf("去重后应为 3 条，实际 %d", len(got))
+	}
+	seen := map[string]bool{}
+	for _, f := range got {
+		if seen[f.ID] {
+			t.Fatalf("重复绑定 %s 未去重", f.ID)
+		}
+		seen[f.ID] = true
+	}
+	if got := dedupeFileBindings(nil); len(got) != 0 {
+		t.Fatalf("空输入应返回空，实际 %v", got)
 	}
 }
 

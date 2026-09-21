@@ -207,18 +207,55 @@ func inlineMime(asset store.Asset, obj io.ReadSeeker) string {
 
 // listEntityFiles 是"这个介质/轨道/表达上挂了哪些文件"的入口。
 // 实体可见性由目录服务判定，绑定与文件元数据由存储服务提供。
+//
+// X01 读聚合：合并只广播事件、不改写别人表里的引用，绑定仍挂在旧 ID 上，
+// 因此按“请求 ID + 存活身份”两 ID 聚合（catalog.AliasSet，与互动侧同一兼容口径），
+// 并按绑定 ID 去重。目录补齐“canonical→历史别名”反向契约后，把 AliasSet 展开点
+// 改成全别名即可，本函数不动。
+// 待反向全量：从存活身份直接读时，历史旧 ID 上的绑定行仍不可见——那是目录反向契约
+// 缺失，不是本查询的遗漏（见 catalog.AliasSet 注释）。
 func (h *Handler) listEntityFiles(c *gin.Context) {
 	entityID := c.Param("id")
 	kind, ok := h.visibleEntity(c, entityID)
 	if !ok {
 		return
 	}
-	files, err := h.db.BindingsForEntity(c.Request.Context(), entityID)
+	ids := []string{entityID}
+	bearer, cookie := h.credentials(c)
+	if ident, err := h.catalog.Identity(c.Request.Context(), entityID, bearer, cookie); err == nil {
+		// 正向链全覆盖：A→B→C 时读 A 的 aliases=[A B]，聚合 {A B C} 一次读全；
+		// 存活身份自身读时 aliases 为空，退化为单 ID。非法 canonical 不进查询。
+		if ident.CanonicalID != "" && ident.CanonicalID != entityID && validID(ident.CanonicalID) {
+			ids = catalog.AliasSet(ident.CanonicalID, append([]string{entityID}, ident.Aliases...)...)
+		}
+	} else if !errors.Is(err, catalog.ErrNotVisible) {
+		// 可见性已确认（visibleEntity 通过），这里问不到的是身份解析：不能回空列表——
+		// 那是“这个实体没有文件”的业务结论，会把依赖故障说成事实。
+		h.log.Printf("storage: 实体 %s 身份解析问不到目录服务，回 503 %s: %v", entityID, upstream.CodeUpstreamUnavailable, err)
+		fail(c, http.StatusServiceUnavailable, upstream.CodeUpstreamUnavailable)
+		return
+	}
+	files, err := h.db.BindingsForEntityIDs(c.Request.Context(), ids)
 	if err != nil {
 		fail(c, 500, "module_error")
 		return
 	}
-	c.JSON(200, gin.H{"target_entity_id": entityID, "target_kind": kind, "files": files})
+	c.JSON(200, gin.H{"target_entity_id": entityID, "target_kind": kind, "files": dedupeFileBindings(files)})
+}
+
+// dedupeFileBindings 按绑定 ID 去重：多 ID 聚合时同一绑定只出现一次。
+// 同一资产挂在新旧两 ID 上的两条绑定是两行事实，不在此合并。
+func dedupeFileBindings(in []store.FileBinding) []store.FileBinding {
+	out := make([]store.FileBinding, 0, len(in))
+	seen := map[string]bool{}
+	for _, f := range in {
+		if seen[f.ID] {
+			continue
+		}
+		seen[f.ID] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 func (h *Handler) download(c *gin.Context) {
