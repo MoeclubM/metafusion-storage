@@ -86,9 +86,9 @@ func (c *Client) Visible(ctx context.Context, entityID, bearer, cookie string) (
 }
 
 // IdentityResolution 是目录侧统一身份解析契约（X01）的本地投影：canonical_id 为存活身份，
-// aliases 为请求链上经过的历史别名（GET /api/catalog/entities/{id}/identity，见目录
-// lifecycle.go 的 IdentityResolution）。目录补齐“canonical→全量历史别名”反向契约前，
-// aliases 只含正向链：读聚合先按“请求 ID + canonical 两 ID”兼容（见 AliasSet）。
+// aliases 为历史别名全集（GET /api/catalog/entities/{id}/identity，见目录
+// lifecycle.go 的 IdentityResolution）：正向链上经过的旧 ID + 存活身份的反向遍历全集，
+// 去重。读聚合按此集合展开（见 AliasSet）。
 type IdentityResolution struct {
 	CanonicalID string   `json:"canonical_id"`
 	Aliases     []string `json:"aliases"`
@@ -182,11 +182,9 @@ func (c *Client) identityViaResolve(ctx context.Context, entityID, bearer, cooki
 	return zero, nil
 }
 
-// AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 全部请求 ID} 去重（与互动
-// internal/catalog/client.go:AliasSet 同一兼容口径）。
-// 这是 X01 的兼容实现：目录补齐“canonical→历史别名”反向契约前，反向（从存活身份 D
-// 找历史 A/B/C）无法枚举——读请求 ID（含正向链）正确，从存活身份读时历史行待回填。
-// 目录契约就绪后改这一处展开全别名即可，调用方不动。
+// AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 请求 ID + 目录返回的别名全集}
+// 去重（与互动 internal/catalog/client.go:AliasSet 同一口径）。目录 identity 契约返回
+// 正向链与反向全集后，调用方把 aliases 原样传入即完成 X01 全量聚合。
 func AliasSet(canonical string, requested ...string) []string {
 	seen := map[string]bool{}
 	out := []string{}

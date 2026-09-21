@@ -19,11 +19,11 @@ import (
 	"github.com/MoeclubM/metafusion-storage/internal/testutil"
 )
 
-// X01 读聚合回归：A→C 合并后，绑定仍挂在旧 ID 上（合并只广播事件、不改写引用），
-// 从旧 ID 读必须聚合“请求 ID + 存活身份”两 ID，且按绑定 ID 去重。
-// 待反向全量：从存活身份 C 直接读时，历史 A 上的行仍不可见——目录“canonical→历史别名”
-// 反向契约未落地（见 catalog.AliasSet 注释）。本用例把该缺口锁成显式断言，不是静默遗漏。
-func TestListEntityFilesAggregatesRequestAndCanonical(t *testing.T) {
+// X01 全量验收：A→C、B→C 两个分支再 C→D，绑定仍挂在旧 ID 上（合并只广播事件、
+// 不改写引用），从存活身份 D 必须一次看见此前全部文件且按绑定 ID 去重。
+// 目录 identity 已返回历史别名全集（正向链 + 反向遍历，去重），本用例的假目录按此
+// 契约返回：从 D 与从分支旧 ID 查都收齐 {A B C}。
+func TestListEntityFilesAggregatesFullAliasSet(t *testing.T) {
 	dsn := testutil.DSN(t) // 未设置 STORAGE_TEST_DSN 时跳过
 	ctx := context.Background()
 	st, err := store.Open(ctx, dsn)
@@ -35,7 +35,7 @@ func TestListEntityFilesAggregatesRequestAndCanonical(t *testing.T) {
 		t.Fatalf("init schema: %v", err)
 	}
 
-	oldID, canonicalID := uuid.NewString(), uuid.NewString()
+	aID, bID, cID, dID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	mkAsset := func(name string) string {
 		t.Helper()
 		id := uuid.NewString()
@@ -49,9 +49,10 @@ func TestListEntityFilesAggregatesRequestAndCanonical(t *testing.T) {
 		}
 		return id
 	}
-	oldAsset, canonicalAsset := mkAsset("old.flac"), mkAsset("new.flac")
-	mkBind := func(assetID, target string) {
-		t.Helper()
+	assets := map[string]string{} // target entity -> asset
+	for target, name := range map[string]string{aID: "a.flac", bID: "b.flac", cID: "c.flac", dID: "d.flac"} {
+		assetID := mkAsset(name)
+		assets[target] = assetID
 		if err := st.Bind(ctx, store.Binding{
 			ID: uuid.NewString(), AssetID: assetID, TargetEntityID: target,
 			TargetKind: "track", BindingRole: "track_audio", CreatedBy: uuid.NewString(),
@@ -59,39 +60,40 @@ func TestListEntityFilesAggregatesRequestAndCanonical(t *testing.T) {
 			t.Fatalf("bind: %v", err)
 		}
 	}
-	mkBind(oldAsset, oldID)
-	mkBind(canonicalAsset, canonicalID)
 	t.Cleanup(func() {
 		bg := context.Background()
-		_, _ = st.DB().ExecContext(bg, "DELETE FROM storage.bindings WHERE asset_id IN ($1,$2)", oldAsset, canonicalAsset)
-		_, _ = st.DB().ExecContext(bg, "DELETE FROM storage.assets WHERE id IN ($1,$2)", oldAsset, canonicalAsset)
+		for _, assetID := range assets {
+			_, _ = st.DB().ExecContext(bg, "DELETE FROM storage.bindings WHERE asset_id=$1", assetID)
+			_, _ = st.DB().ExecContext(bg, "DELETE FROM storage.assets WHERE id=$1", assetID)
+		}
 	})
 
+	// 假目录按 identity 契约返回全集：从 D 与从任一历史 ID 查，canonical 都是 D，
+	// aliases 都是 {A B C}（目录 31c63e4：正向链 + 反向遍历，去重）。
+	fullAliases := []string{aID, bID, cID}
 	cat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		entity := func(id string) map[string]any { return map[string]any{"id": id, "kind": "track"} }
-		identity := func(canonical string, aliases []string) map[string]any {
-			return map[string]any{"canonical_id": canonical, "aliases": aliases, "entity": entity(canonical)}
+		for _, id := range []string{aID, bID, cID, dID} {
+			if p == "/api/catalog/entities/"+id {
+				_ = json.NewEncoder(w).Encode(entity(id))
+				return
+			}
+			if p == "/api/catalog/entities/"+id+"/identity" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"canonical_id": dID, "aliases": fullAliases, "entity": entity(dID),
+				})
+				return
+			}
 		}
-		switch p {
-		case "/api/catalog/entities/" + oldID:
-			_ = json.NewEncoder(w).Encode(entity(oldID))
-		case "/api/catalog/entities/" + canonicalID:
-			_ = json.NewEncoder(w).Encode(entity(canonicalID))
-		case "/api/catalog/entities/" + oldID + "/identity":
-			_ = json.NewEncoder(w).Encode(identity(canonicalID, []string{oldID}))
-		case "/api/catalog/entities/" + canonicalID + "/identity":
-			_ = json.NewEncoder(w).Encode(identity(canonicalID, []string{}))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer cat.Close()
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	New(st, &objects.Store{}, catalog.New(cat.URL), newVerifier(t, "http://127.0.0.1:1/jwks"), config.Config{}).Register(r)
-	getFiles := func(entityID string) []map[string]any {
+	assetSetOf := func(entityID string) map[string]bool {
 		t.Helper()
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/storage/entities/"+entityID+"/files", nil))
@@ -104,11 +106,8 @@ func TestListEntityFilesAggregatesRequestAndCanonical(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 			t.Fatalf("解析文件列表失败: %v", err)
 		}
-		return out.Files
-	}
-	assetsOf := func(files []map[string]any) (assets, bindings map[string]bool) {
-		assets, bindings = map[string]bool{}, map[string]bool{}
-		for _, f := range files {
+		assets, bindings := map[string]bool{}, map[string]bool{}
+		for _, f := range out.Files {
 			if id, _ := f["id"].(string); id != "" {
 				if bindings[id] {
 					t.Fatalf("绑定 %s 重复出现", id)
@@ -121,21 +120,25 @@ func TestListEntityFilesAggregatesRequestAndCanonical(t *testing.T) {
 				}
 			}
 		}
-		return assets, bindings
+		return assets
 	}
 
-	// 从旧 ID 读：旧绑定 + 存活身份上的绑定一次可见，且去重。
-	assets, _ := assetsOf(getFiles(oldID))
-	if !assets[oldAsset] || !assets[canonicalAsset] {
-		t.Fatalf("从旧 ID 应聚合两 ID 的文件，实际资产 %v", assets)
+	want := map[string]bool{}
+	for _, assetID := range assets {
+		want[assetID] = true
 	}
-
-	// 从存活身份读：历史旧 ID 上的行仍不可见（待目录反向契约）。
-	assets, _ = assetsOf(getFiles(canonicalID))
-	if !assets[canonicalAsset] {
-		t.Fatalf("存活身份自己的文件必须可见，实际资产 %v", assets)
+	// 从存活身份 D：A/B/C/D 四处绑定一次可见，且无重复。
+	if got := assetSetOf(dID); len(got) != 4 {
+		t.Fatalf("从 D 应看见全部 4 份文件，实际 %d（%v）", len(got), got)
+	} else {
+		for id := range want {
+			if !got[id] {
+				t.Fatalf("从 D 缺少资产 %s（实际 %v）", id, got)
+			}
+		}
 	}
-	if assets[oldAsset] {
-		t.Fatalf("待反向全量：目录反向契约落地前，从存活身份不应看到历史旧 ID 的行（若此断言失败说明反向已可用，请升级实现并改断言）")
+	// 从分支旧 ID：同样收齐全集。
+	if got := assetSetOf(aID); len(got) != 4 {
+		t.Fatalf("从分支旧 ID 应收齐全集，实际 %d（%v）", len(got), got)
 	}
 }

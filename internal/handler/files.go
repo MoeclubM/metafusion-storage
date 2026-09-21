@@ -209,11 +209,9 @@ func inlineMime(asset store.Asset, obj io.ReadSeeker) string {
 // 实体可见性由目录服务判定，绑定与文件元数据由存储服务提供。
 //
 // X01 读聚合：合并只广播事件、不改写别人表里的引用，绑定仍挂在旧 ID 上，
-// 因此按“请求 ID + 存活身份”两 ID 聚合（catalog.AliasSet，与互动侧同一兼容口径），
-// 并按绑定 ID 去重。目录补齐“canonical→历史别名”反向契约后，把 AliasSet 展开点
-// 改成全别名即可，本函数不动。
-// 待反向全量：从存活身份直接读时，历史旧 ID 上的绑定行仍不可见——那是目录反向契约
-// 缺失，不是本查询的遗漏（见 catalog.AliasSet 注释）。
+// 因此按 {请求 ID + 存活身份 + 目录别名全集} 聚合（catalog.AliasSet，与互动侧同一口径），
+// 并按绑定 ID 去重。目录 identity 已返回正向链与反向全集：A→C、B→C、C→D 后从 D
+// 一次读全 A/B/C/D 上的绑定。
 func (h *Handler) listEntityFiles(c *gin.Context) {
 	entityID := c.Param("id")
 	kind, ok := h.visibleEntity(c, entityID)
@@ -223,9 +221,9 @@ func (h *Handler) listEntityFiles(c *gin.Context) {
 	ids := []string{entityID}
 	bearer, cookie := h.credentials(c)
 	if ident, err := h.catalog.Identity(c.Request.Context(), entityID, bearer, cookie); err == nil {
-		// 正向链全覆盖：A→B→C 时读 A 的 aliases=[A B]，聚合 {A B C} 一次读全；
-		// 存活身份自身读时 aliases 为空，退化为单 ID。非法 canonical 不进查询。
-		if ident.CanonicalID != "" && ident.CanonicalID != entityID && validID(ident.CanonicalID) {
+		// 全集展开：从旧 ID 读带正向链，从存活身份读带反向全集（目录 identity 已收齐去重）；
+		// 别名空时退化为单 ID。非法 canonical 不进查询。
+		if ident.CanonicalID != "" && validID(ident.CanonicalID) {
 			ids = catalog.AliasSet(ident.CanonicalID, append([]string{entityID}, ident.Aliases...)...)
 		}
 	} else if !errors.Is(err, catalog.ErrNotVisible) {
