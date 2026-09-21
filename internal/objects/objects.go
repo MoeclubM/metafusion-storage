@@ -79,10 +79,18 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	if err = ensureBucket(probe, client, cfg.S3Bucket); err != nil {
-		return nil, err
+	// 最小权限：STORAGE_S3_SKIP_BUCKET_ENSURE=true 时跳过建桶/查桶，只用仅目标桶数据操作
+	// 的服务凭据启动（s3:GetObject/PutObject/DeleteObject/AbortMultipart 等，不含
+	// s3:CreateBucket）。桶由运维身份事先建好；跳过的是"保证桶存在"，不是"保证能读写"——
+	// 读写失败仍在首次请求时显式报错，不会静默。
+	if !cfg.S3SkipBucketEnsure {
+		probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if err = ensureBucket(probe, client, cfg.S3Bucket); err != nil {
+			return nil, err
+		}
+	} else if cfg.S3Bucket == "" {
+		return nil, errors.New("STORAGE_S3_BUCKET 为空：跳过建桶时必须显式指定目标桶")
 	}
 	s.client, s.core, s.signer = client, core, signer
 	return s, nil
@@ -215,6 +223,9 @@ func (s *Store) AbortUpload(ctx context.Context, key, uploadID string) error {
 
 // PresignDownload 签发下载地址：文件名通过 response-content-disposition 带出，
 // 避免为了改文件名而在服务端中转整份数据。
+//
+// 撤销窗口：地址在 ttl 内持续有效，事后改数据库状态撤销不了已签发的地址
+// （见 download 的注释）。立即禁发需求用短期签名或走鉴权代理的 content 口。
 func (s *Store) PresignDownload(ctx context.Context, key, fileName string) (string, time.Time, error) {
 	expires := time.Now().Add(s.ttl)
 	if s.local {

@@ -56,31 +56,70 @@ type Config struct {
 	// VerifyTimeout 是同一段回读的墙钟上限：读不完即失败（verify_timeout），同样不跳过校验。
 	// 0 表示不限制，与"刻意不设 ReadTimeout/WriteTimeout"的大文件取向一致。
 	VerifyTimeout time.Duration
+	// PendingTTLHours 是 pending 按年龄回收的兜底窗口：超过它且租约过期、无绑定的
+	// pending 由后台清理任务回收（storage-server worker）。存量 NULL 租约的行按
+	// created_at + 该值判定，迁移不回填策略值。
+	PendingTTLHours int
+	// UploadLeaseMinutes 是单次上传租约（分钟）：initiate 落定到期时间，续传刷新。
+	// 0 表示跟随 PresignTTL——直传地址过期了租约也没意义，两者默认同寿命。
+	UploadLeaseMinutes int
+	// UserQuotaMB / SiteQuotaMB 是容量预算（MB）：complete 计真实字节，pending 计声明大小。
+	// 0 表示不限制（默认）：先有统计口径（/stats 与 UserUsage/SiteUsage），再收紧。
+	UserQuotaMB int
+	SiteQuotaMB int
+	// UserConcurrentUploads / SiteConcurrentUploads 是并发预算：进行中的 pending 数上限。
+	// 0 表示不限制；超限时 initiate 回 429 too_many_uploads，容量超限回 413 quota_exceeded。
+	UserConcurrentUploads int
+	SiteConcurrentUploads int
+	// OrphanRetentionDays 是孤儿对象保留期（天）：对象存储上有、库里无引用的键，
+	// 首次发现超过该天数才由 worker 搬进 quarantine/ 隔离；隔离≠删除，字节删除由运维确认。
+	OrphanRetentionDays int
+	// S3SkipBucketEnsure 是否跳过本服务的建桶检查：默认 false，保持既有行为
+	// 置 true 时跳过 BucketExists/MakeBucket，只用仅目标桶数据操作的服务凭据启动（最小权限，见 README）。
+	// 管理面（建桶/删桶/跨桶）用另外的运维身份，不与服务凭据共用。
+	S3SkipBucketEnsure bool
 }
 
 func Load() Config {
 	c := Config{
-		Port:             env("PORT", "8082"),
-		TrustedProxies:   env("TRUSTED_PROXIES", ""),
-		DatabaseURL:      env("DATABASE_URL", ""),
-		Root:             env("STORAGE_ROOT", env("ARCHIVE_PATH", "./storage-data")),
-		S3Endpoint:       env("STORAGE_S3_ENDPOINT", env("ARCHIVE_S3_ENDPOINT", "")),
-		S3PublicEndpoint: env("STORAGE_S3_PUBLIC_ENDPOINT", env("ARCHIVE_S3_PUBLIC_ENDPOINT", "")),
-		S3AccessKey:      env("STORAGE_S3_ACCESS_KEY", env("ARCHIVE_S3_ACCESS_KEY", "")),
-		S3SecretKey:      env("STORAGE_S3_SECRET_KEY", env("ARCHIVE_S3_SECRET_KEY", "")),
-		S3Bucket:         env("STORAGE_S3_BUCKET", env("ARCHIVE_S3_BUCKET", "metafusion-master")),
-		S3TLS:            envBool("STORAGE_S3_TLS", env("ARCHIVE_S3_TLS", "true") != "false"),
-		JWKSURL:          env("STORAGE_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
-		JWTPublicKeyPEM:  env("AUTH_JWT_PUBLIC_KEY", ""),
-		JWTIssuer:        env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
-		JWTAudience:      env("AUTH_JWT_AUDIENCE", "metafusion"),
-		AuthURL:          env("AUTH_URL", ""),
-		CatalogURL:       env("CATALOG_URL", "http://backend:8080"),
-		PresignTTL:       time.Duration(envInt("STORAGE_PRESIGN_TTL_MINUTES", 120)) * time.Minute,
-		MaxPartCount:     envInt("STORAGE_MAX_PARTS", 10000),
-		MaxUploadMB:      envInt("STORAGE_MAX_UPLOAD_MB", 0),
-		VerifyMaxMB:      envInt("STORAGE_VERIFY_MAX_MB", 0),
-		VerifyTimeout:    time.Duration(envInt("STORAGE_VERIFY_TIMEOUT_SECONDS", 0)) * time.Second,
+		Port:                  env("PORT", "8082"),
+		TrustedProxies:        env("TRUSTED_PROXIES", ""),
+		DatabaseURL:           env("DATABASE_URL", ""),
+		Root:                  env("STORAGE_ROOT", env("ARCHIVE_PATH", "./storage-data")),
+		S3Endpoint:            env("STORAGE_S3_ENDPOINT", env("ARCHIVE_S3_ENDPOINT", "")),
+		S3PublicEndpoint:      env("STORAGE_S3_PUBLIC_ENDPOINT", env("ARCHIVE_S3_PUBLIC_ENDPOINT", "")),
+		S3AccessKey:           env("STORAGE_S3_ACCESS_KEY", env("ARCHIVE_S3_ACCESS_KEY", "")),
+		S3SecretKey:           env("STORAGE_S3_SECRET_KEY", env("ARCHIVE_S3_SECRET_KEY", "")),
+		S3Bucket:              env("STORAGE_S3_BUCKET", env("ARCHIVE_S3_BUCKET", "metafusion-master")),
+		S3TLS:                 envBool("STORAGE_S3_TLS", env("ARCHIVE_S3_TLS", "true") != "false"),
+		JWKSURL:               env("STORAGE_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
+		JWTPublicKeyPEM:       env("AUTH_JWT_PUBLIC_KEY", ""),
+		JWTIssuer:             env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
+		JWTAudience:           env("AUTH_JWT_AUDIENCE", "metafusion"),
+		AuthURL:               env("AUTH_URL", ""),
+		CatalogURL:            env("CATALOG_URL", "http://backend:8080"),
+		PresignTTL:            time.Duration(envInt("STORAGE_PRESIGN_TTL_MINUTES", 120)) * time.Minute,
+		MaxPartCount:          envInt("STORAGE_MAX_PARTS", 10000),
+		MaxUploadMB:           envInt("STORAGE_MAX_UPLOAD_MB", 0),
+		VerifyMaxMB:           envInt("STORAGE_VERIFY_MAX_MB", 0),
+		VerifyTimeout:         time.Duration(envInt("STORAGE_VERIFY_TIMEOUT_SECONDS", 0)) * time.Second,
+		PendingTTLHours:       envInt("STORAGE_PENDING_TTL_HOURS", 72),
+		UploadLeaseMinutes:    envInt("STORAGE_UPLOAD_LEASE_MINUTES", 0),
+		UserQuotaMB:           envInt("STORAGE_USER_QUOTA_MB", 0),
+		SiteQuotaMB:           envInt("STORAGE_SITE_QUOTA_MB", 0),
+		UserConcurrentUploads: envInt("STORAGE_USER_CONCURRENT_UPLOADS", 0),
+		SiteConcurrentUploads: envInt("STORAGE_SITE_CONCURRENT_UPLOADS", 0),
+		OrphanRetentionDays:   envInt("STORAGE_ORPHAN_RETENTION_DAYS", 7),
+		S3SkipBucketEnsure:    envBool("STORAGE_S3_SKIP_BUCKET_ENSURE", env("ARCHIVE_S3_SKIP_BUCKET_ENSURE", "false") == "true"),
+	}
+	if c.UploadLeaseMinutes <= 0 {
+		c.UploadLeaseMinutes = int(c.PresignTTL.Minutes())
+		if c.UploadLeaseMinutes <= 0 {
+			c.UploadLeaseMinutes = 120
+		}
+	}
+	if c.PendingTTLHours <= 0 {
+		c.PendingTTLHours = 72
 	}
 	if c.S3PublicEndpoint == "" {
 		c.S3PublicEndpoint = c.S3Endpoint
@@ -104,6 +143,34 @@ func buildDSN() string {
 	q.Set("sslmode", env("DB_SSLMODE", "disable"))
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// UploadLease 是单次上传租约时长（Load 已收敛：未配置即跟随预签名有效期）。
+func (c Config) UploadLease() time.Duration {
+	if c.UploadLeaseMinutes <= 0 {
+		return 120 * time.Minute
+	}
+	return time.Duration(c.UploadLeaseMinutes) * time.Minute
+}
+
+// PendingTTL 是 pending 按年龄回收的兜底窗口。
+func (c Config) PendingTTL() time.Duration {
+	if c.PendingTTLHours <= 0 {
+		return 72 * time.Hour
+	}
+	return time.Duration(c.PendingTTLHours) * time.Hour
+}
+
+// UserQuotaBytes / SiteQuotaBytes 是容量预算的字节数：0 表示不限制。
+func (c Config) UserQuotaBytes() int64 { return int64(c.UserQuotaMB) << 20 }
+func (c Config) SiteQuotaBytes() int64 { return int64(c.SiteQuotaMB) << 20 }
+
+// OrphanRetention 是孤儿对象保留期。
+func (c Config) OrphanRetention() time.Duration {
+	if c.OrphanRetentionDays <= 0 {
+		return 7 * 24 * time.Hour
+	}
+	return time.Duration(c.OrphanRetentionDays) * 24 * time.Hour
 }
 
 func env(k, def string) string {

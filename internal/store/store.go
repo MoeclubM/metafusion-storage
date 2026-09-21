@@ -37,6 +37,14 @@ type Asset struct {
 	MultipartUploadID string `json:"multipart_upload_id,omitempty"`
 	HashVerified      bool   `json:"hash_verified"`
 	UploaderID        string `json:"uploader_id"`
+	// UploadExpiresAt 是上传租约到期时间：过期未完成的 pending 由后台清理任务回收。
+	// 存量 NULL 按 created_at + 默认 TTL 兜底（见 lifecycle.go 的回收查询），迁移不回填策略值。
+	UploadExpiresAt *time.Time `json:"upload_expires_at,omitempty"`
+	// Blocked 是独立于 status 的禁发标记：status 只回答"内容是否验过"，
+	// Blocked 只回答"是否允许分发"（目录公开 ≠ 文件可分发）。解禁后原状态仍在。
+	Blocked       bool       `json:"blocked"`
+	BlockedReason string     `json:"blocked_reason,omitempty"`
+	BlockedAt     *time.Time `json:"blocked_at,omitempty"`
 	// FailReason 只在服务端回读校验失败时写入，供运维与上传者定位；不参与任何判定。
 	FailReason  string     `json:"fail_reason,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
@@ -88,11 +96,11 @@ func (s *Store) Init(ctx context.Context) error {
 	return err
 }
 
-const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,fail_reason,uploader_id,created_at,completed_at"
+const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,fail_reason,uploader_id,upload_expires_at,blocked,blocked_reason,blocked_at,created_at,completed_at"
 
 func scanAsset(row interface{ Scan(...any) error }) (Asset, error) {
 	var a Asset
-	err := row.Scan(&a.ID, &a.SHA256, &a.SizeBytes, &a.DeclaredSize, &a.MimeType, &a.FileName, &a.ObjectKey, &a.Status, &a.MultipartUploadID, &a.HashVerified, &a.FailReason, &a.UploaderID, &a.CreatedAt, &a.CompletedAt)
+	err := row.Scan(&a.ID, &a.SHA256, &a.SizeBytes, &a.DeclaredSize, &a.MimeType, &a.FileName, &a.ObjectKey, &a.Status, &a.MultipartUploadID, &a.HashVerified, &a.FailReason, &a.UploaderID, &a.UploadExpiresAt, &a.Blocked, &a.BlockedReason, &a.BlockedAt, &a.CreatedAt, &a.CompletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -117,9 +125,11 @@ func (s *Store) VerifiedAssetByHash(ctx context.Context, sha256 string) (Asset, 
 	return scanAsset(s.db.QueryRowContext(ctx, "SELECT "+assetCols+" FROM storage.assets WHERE sha256=$1 AND hash_verified", sha256))
 }
 
+// CreateAsset 登记一份上传占位：调用方（initiate）同时给出 upload_expires_at 租约，
+// NULL 表示存量/未知租约，回收查询按 created_at + 默认 TTL 兜底。
 func (s *Store) CreateAsset(ctx context.Context, a Asset) error {
-	_, err := s.db.ExecContext(ctx, "INSERT INTO storage.assets(id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,uploader_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-		a.ID, a.SHA256, a.SizeBytes, a.DeclaredSize, a.MimeType, a.FileName, a.ObjectKey, a.Status, a.MultipartUploadID, a.UploaderID)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO storage.assets(id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,uploader_id,upload_expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+		a.ID, a.SHA256, a.SizeBytes, a.DeclaredSize, a.MimeType, a.FileName, a.ObjectKey, a.Status, a.MultipartUploadID, a.UploaderID, a.UploadExpiresAt)
 	return err
 }
 
@@ -236,7 +246,7 @@ func (s *Store) BindingsForEntityIDs(ctx context.Context, entityIDs []string) ([
 		args[i] = id
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT b.id,b.asset_id,b.target_entity_id,b.target_kind,b.binding_role,b.created_by,b.created_at,
-		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.fail_reason,a.uploader_id,a.created_at,a.completed_at
+		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.fail_reason,a.uploader_id,a.upload_expires_at,a.blocked,a.blocked_reason,a.blocked_at,a.created_at,a.completed_at
 		FROM storage.bindings b JOIN storage.assets a ON a.id=b.asset_id
 		WHERE b.target_entity_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY b.created_at DESC LIMIT 500`, args...)
 	if err != nil {
@@ -248,7 +258,7 @@ func (s *Store) BindingsForEntityIDs(ctx context.Context, entityIDs []string) ([
 		var f FileBinding
 		if err = rows.Scan(&f.ID, &f.AssetID, &f.TargetEntityID, &f.TargetKind, &f.BindingRole, &f.CreatedBy, &f.CreatedAt,
 			&f.Asset.ID, &f.Asset.SHA256, &f.Asset.SizeBytes, &f.Asset.DeclaredSize, &f.Asset.MimeType, &f.Asset.FileName, &f.Asset.ObjectKey,
-			&f.Asset.Status, &f.Asset.MultipartUploadID, &f.Asset.HashVerified, &f.Asset.FailReason, &f.Asset.UploaderID, &f.Asset.CreatedAt, &f.Asset.CompletedAt); err != nil {
+			&f.Asset.Status, &f.Asset.MultipartUploadID, &f.Asset.HashVerified, &f.Asset.FailReason, &f.Asset.UploaderID, &f.Asset.UploadExpiresAt, &f.Asset.Blocked, &f.Asset.BlockedReason, &f.Asset.BlockedAt, &f.Asset.CreatedAt, &f.Asset.CompletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
