@@ -64,6 +64,8 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/upload/complete", v.Required(), h.requireUpload(), h.completeUpload)
 		api.PUT("/upload/stream/:assetId", v.Required(), h.requireUpload(), h.streamUpload)
 		api.POST("/bind", v.Required(), h.requireUpload(), h.bind)
+		api.POST("/assets/:id/block", v.Required(), h.blockAsset)
+		api.POST("/assets/:id/unblock", v.Required(), h.unblockAsset)
 		// 解绑只能删自己的绑定（handler 内按上传者判定），不需要额外权限码。
 		api.DELETE("/bindings/:id", v.Required(), h.unbind)
 		api.POST("/verify-hash", v.Middleware(), h.verifyHash)
@@ -295,6 +297,8 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 			fail(c, 503, "storage_unavailable")
 			return
 		}
+		// 续传即"我还活着"：刷新租约，避免传得慢的上传被清理任务收走。
+		_ = h.db.SetUploadExpiry(ctx, asset.ID, time.Now().Add(h.cfg.UploadLease()))
 		// 续传/覆盖他人未完成的上传是跨用户处置：摘要里点出这次到底是不是替别人收尾。
 		h.auditAsset(c, asset, map[string]any{"resumed": true, "part_count": in.PartCount, "cross_user": asset.UploaderID != p.ID})
 		c.JSON(200, resp)
@@ -304,15 +308,34 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 		return
 	}
 
+	// 配额只拦"新建占位"：续传是把已占的预算传完，不在此判定（见 quotaCheck）。
+	if quotasEnabled(h.cfg) {
+		u, uerr := h.db.UserUsage(ctx, p.ID)
+		if uerr != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		site, serr := h.db.SiteUsage(ctx)
+		if serr != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		if code, status := quotaCheck(u, site, in.FileSize, h.cfg); code != "" {
+			fail(c, status, code)
+			return
+		}
+	}
+	lease := time.Now().Add(h.cfg.UploadLease())
 	asset = store.Asset{
-		ID:           uuid.NewString(),
-		SHA256:       in.SHA256Hash,
-		DeclaredSize: in.FileSize,
-		MimeType:     in.MimeType,
-		FileName:     in.FileName,
-		ObjectKey:    h.objects.KeyFor(in.SHA256Hash, in.FileName),
-		Status:       "pending",
-		UploaderID:   p.ID,
+		ID:              uuid.NewString(),
+		SHA256:          in.SHA256Hash,
+		DeclaredSize:    in.FileSize,
+		MimeType:        in.MimeType,
+		FileName:        in.FileName,
+		ObjectKey:       h.objects.KeyFor(in.SHA256Hash, in.FileName),
+		Status:          "pending",
+		UploaderID:      p.ID,
+		UploadExpiresAt: &lease,
 	}
 	if err = h.db.CreateAsset(ctx, asset); err != nil {
 		fail(c, 500, "module_error")

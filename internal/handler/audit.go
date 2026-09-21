@@ -23,6 +23,8 @@ var auditActions = map[string]string{
 	"POST /api/storage/upload/complete":       "asset.upload_completed",
 	"PUT /api/storage/upload/stream/:assetId": "asset.upload_streamed",
 	"POST /api/storage/bind":                  "binding.created",
+	"POST /api/storage/assets/:id/block":      "asset.blocked",
+	"POST /api/storage/assets/:id/unblock":    "asset.unblocked",
 	"DELETE /api/storage/bindings/:id":        "binding.removed",
 }
 

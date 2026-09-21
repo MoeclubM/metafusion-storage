@@ -39,6 +39,11 @@ func (h *Handler) readable(c *gin.Context, asset store.Asset) (bool, error) {
 	if canManageAsset(p, asset.UploaderID) {
 		return true, nil
 	}
+	// 禁发位：目录公开不等于文件可分发。blocked 只拦分发——上传者本人与审核者
+	// 仍由上一行直通（处置与自查），其余人即使绑定实体可见也不可读。
+	if asset.Blocked {
+		return false, nil
+	}
 	if asset.Status != "complete" {
 		return false, nil
 	}
@@ -238,6 +243,8 @@ func (h *Handler) listEntityFiles(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
+	// 被禁发的文件不对无权者透露存在性（与 readable 同口径，见 governance.go 三态门禁）。
+	files = filterBlocked(files, auth.Current(c))
 	c.JSON(200, gin.H{"target_entity_id": entityID, "target_kind": kind, "files": dedupeFileBindings(files)})
 }
 
@@ -278,6 +285,10 @@ func (h *Handler) download(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "private, no-store")
 	if !h.objects.Local() {
+		// 撤销窗口：签发出的 URL 在 PresignTTL 内（默认 120 分钟）持续有效，
+		// 数据库改 blocked/解绑拦不住它——那是对象存储与签发方的直接约定。
+		// 要求立即禁发的分发走短期签名（调小 STORAGE_PRESIGN_TTL_MINUTES）或鉴权代理
+		// （/assets/:id/content 每次重新鉴权），不要宣称"已禁发"等于"已阻断一切访问"。
 		url, expires, err := h.objects.PresignDownload(ctx, asset.ObjectKey, asset.FileName)
 		if err != nil {
 			fail(c, 503, "storage_unavailable")
@@ -435,5 +446,10 @@ func (h *Handler) stats(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
-	c.JSON(200, gin.H{"assets": assets, "bytes": bytes})
+	pending, blocked, err := h.db.StatusCounts(c.Request.Context())
+	if err != nil {
+		fail(c, 500, "module_error")
+		return
+	}
+	c.JSON(200, gin.H{"assets": assets, "bytes": bytes, "pending": pending, "blocked": blocked})
 }
