@@ -33,11 +33,13 @@ type Principal struct {
 	Role        string   `json:"role"`
 	Groups      []string `json:"groups,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
-	// Scope/ClientID 是第三方 OAuth 令牌的标记（与签发侧对齐）：站内会话令牌永不携带
-	// 这两项，携带即视为第三方授权（见 S01）。不进 JSON 输出、不暴露给调用方。
+	// Scope/ClientID 是第三方 OAuth 授权的绑定标记（与签发侧对齐）：站内会话签发恒清零
+	// 这两项；用途判定见 Verify（只认 token_use，缺用途时才看这两项过渡标记）。
+	// 不进 JSON 输出、不暴露给调用方。
 	Scope    string `json:"-"`
 	ClientID string `json:"-"`
-	// IsThirdParty 标记身份来自第三方 OAuth 授权（scope/client_id/token_use 任一非空）。
+	// IsThirdParty 标记身份来自第三方 OAuth 授权（仅 token_use=oauth/id_token，或缺用途
+	// 时带 scope/client_id/token_type 过渡标记；token_use=session 永为第一方）。
 	// 治理类权限默认拒绝此类令牌（见 permission.go 的 Can），不进 JSON 输出。
 	IsThirdParty bool `json:"-"`
 	// PermissionsSet 标记令牌是否显式携带 permissions 声明（含空数组）：携带即以码为准，
@@ -174,9 +176,11 @@ type claims struct {
 	Role        string   `json:"role"`
 	Groups      []string `json:"groups,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
-	// Scope/ClientID/TokenUse 是第三方 OAuth 令牌的标记（与签发侧对齐）：站内会话
-	// 令牌永不携带这几项；audience 收口（Verify 的 WithAudience）已拒掉 aud 指向
-	// 客户端的令牌，这里再拦“aud 仍是平台但带 OAuth 标记”的那一种。
+	// Scope/ClientID/TokenUse 与签发侧对齐（auth Sign 恒写 token_use=session 并清零
+	// scope/client_id；SignOAuth 写 token_use=oauth，SignForAudience 写 token_use=id_token）：
+	// 用途判定只认 token_use（见 Verify 与 isThirdPartyUse），audience 收口
+	// （Verify 的 WithAudience）已拒掉 aud 指向客户端的令牌，这里再拦“aud 仍是平台
+	// 但带 OAuth 标记”的那一种。
 	Scope     string `json:"scope"`
 	ClientID  string `json:"client_id"`
 	Cid       string `json:"cid"`
@@ -204,6 +208,30 @@ func (c *claims) UnmarshalJSON(raw []byte) error {
 	}
 	_, c.permissionsPresent = keys["permissions"]
 	return nil
+}
+
+// 令牌用途取值，与账号服务 store.TokenUse 同源：判定只认这三个值与空串
+// （历史令牌缺键，按会话语义兼容）；未知取值在 Verify 直接拒收。
+const (
+	TokenUseSession = "session"
+	TokenUseOAuth   = "oauth"
+	TokenUseIDToken = "id_token"
+)
+
+// isThirdPartyUse 报告该用途是否为第三方（oauth 访问令牌或发给当事客户端的 id_token）。
+func isThirdPartyUse(use string) bool {
+	return use == TokenUseOAuth || use == TokenUseIDToken
+}
+
+// validTokenUse 判定载荷里的用途声明是否合法：未知取值直接拒收，防止将来新增用途的
+// 令牌被当成已知用途放行（与签发侧 validTokenUse 同口径）。
+func validTokenUse(use string) bool {
+	switch use {
+	case "", TokenUseSession, TokenUseOAuth, TokenUseIDToken:
+		return true
+	default:
+		return false
+	}
 }
 
 const keyCacheTTL = 10 * time.Minute
@@ -301,11 +329,20 @@ func (v *Verifier) Verify(token string) (*Principal, error) {
 	if clientID == "" {
 		clientID = c.Cid
 	}
-	// 第三方判定：站内会话令牌永不带 scope/client_id/token_use，任一非空即第三方。
-	// audience 已在验签时收口（aud 非平台直接失败），这里拦的是“aud 仍是平台但带
-	// OAuth 标记”的令牌（签发侧过渡态，见 S01）。
-	thirdParty := strings.TrimSpace(c.Scope) != "" || strings.TrimSpace(clientID) != "" ||
-		strings.TrimSpace(c.TokenUse) != "" || strings.TrimSpace(c.TokenType) != ""
+	// 用途隔离（与签发侧及互动 internal/auth/auth.go:325 同一契约）：会话 JWT 恒带
+	// token_use=session，必须按第一方放行；只有 oauth/id_token 才是第三方；缺省（空串）
+	// 是历史令牌，按会话语义兼容。缺省用途下若仍带 scope/client_id/token_type
+	// （签发侧过渡态，会话签发恒清零这几项），视为第三方。未知用途 fail closed
+	// （直接拒收，不按匿名放行）。
+	use := strings.TrimSpace(c.TokenUse)
+	if !validTokenUse(use) {
+		return nil, errors.New("bad token_use")
+	}
+	thirdParty := isThirdPartyUse(use)
+	if use == "" && !thirdParty {
+		thirdParty = strings.TrimSpace(c.Scope) != "" || strings.TrimSpace(clientID) != "" ||
+			strings.TrimSpace(c.TokenType) != ""
+	}
 	return &Principal{ID: c.Subject, Username: c.Username, Role: c.Role, Groups: c.Groups, Permissions: c.Permissions, Scope: strings.TrimSpace(c.Scope), ClientID: strings.TrimSpace(clientID), IsThirdParty: thirdParty, PermissionsSet: c.permissionsPresent}, nil
 }
 
