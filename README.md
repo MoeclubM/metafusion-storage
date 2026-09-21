@@ -36,6 +36,8 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | PUT | `/upload/stream/{asset_id}` | 登录 + `upload`；资产属他人时另需审核者 | 服务端流式接收（本地对象模式的主要上传方式，也可作为预签名不可用时的兜底）；落盘前流式计算 sha256 与声明比对 |
 | POST | `/bind` | 登录 + `upload`；资产属他人时另需审核者 | 绑定到目录实体，带 `binding_role` 用途 |
 | DELETE | `/bindings/{id}` | 绑定创建者/上传者/审核者 | 解绑纠错 |
+| POST | `/assets/{id}/block` | 审核者 | 禁发：只翻禁发位，不删绑定、不改校验状态，误禁可逆 |
+| POST | `/assets/{id}/unblock` | 审核者 | 解禁：原状态即恢复分发资格（仍需满足另两态） |
 | GET | `/assets/{id}` | 可读 | 文件元数据 + 绑定列表 |
 | GET | `/assets/{id}/content` | 可读 | **原样**内联分发对象内容（不转码）：给目录数据里需要长期引用、能被 `<img>` 直接加载的地址用；`download` 在对象存储模式下只回预签名地址（会过期、Host 是对象存储端点），不能当稳定地址 |
 | GET | `/entities/{id}/files` | 实体可见 | 「这个介质/轨道/表达上挂了哪些文件」入口 |
@@ -47,10 +49,31 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 下载、元数据读取与哈希校验共用这一判定，避免同一份文件在不同接口上出现「能下载不能预览」的差异；
 `/assets/{id}/content` 也走同一判定（响应只进私有缓存：可见性按请求判定，不能被共享缓存复用）。
 
+### 三态门禁：校验完成 / 目录公开 / 允许分发
+
+一份文件能不能分发出去，由三个正交状态共同决定（生产目标 §6，实现见 `internal/handler/governance.go`）：
+
+| 状态 | 存哪 | 含义 |
+| --- | --- | --- |
+| 校验完成 | `assets.status`（`pending`/`complete`） | 内容是否经服务端验过。只有 `complete` 能分发；`pending` 是"还没验过"，不是"还没公开" |
+| 目录公开 | 目录服务（可见性判定） | 任一绑定目标实体对请求者可见。问不到目录服务是 `503`，不是"不可见" |
+| 允许分发 | `assets.blocked`（禁发位） | 审核者的独立处置位。**目录公开不等于文件可分发**；禁发只拦分发，不删绑定、不改状态，解禁即恢复 |
+
+禁发用独立列而不用第三个 `status` 值：`status` 只回答"内容是否验过"，`blocked` 只回答"是否允许分发"，
+解禁后原状态仍在，不需要"解禁恢复"的分支。全部下载/预览/签名入口（`download`、`content`、秒传命中的复用、
+`verify-hash` 的按 asset 校验、实体文件列表）共用这一判定，无权者对被禁发文件一律看到 `404`（不区分无权限与不存在）。
+
 **问不到目录服务 ≠ 不可见**：目录侧明确回答"不存在/不可见"仍是 `404 not_found`；而超时、连接失败、
 5xx 或熔断打开时，`/entities/{id}/files`、`/assets/{id}`（及其 content / download / verify-hash 的读取判定）
 回 `503` + `{"error":"upstream_unavailable"}`（机器码 `upstream.CodeUpstreamUnavailable`）。
 把两者折成一个结果，会让上游抖动表现成"这份文件不存在"——文件从实体列表里静默消失，用户与运维都看不出区别。
+
+### 签名撤销窗口
+
+对象存储模式的 `download` 返回预签名地址，有效期 `STORAGE_PRESIGN_TTL_MINUTES`（默认 **120 分钟**）：
+签发出的地址在有效期内持续有效，**事后改禁发位/解绑拦不住它**——那是对象存储与签发方的直接约定。
+因此不要宣称"已禁发"等于"已阻断一切访问"。要求立即禁发的分发走两条路：调小预签名有效期
+（窗口按分钟收敛），或走鉴权代理 `/assets/{id}/content`（每次请求重新鉴权，无残留窗口）。
 
 ### 就绪探针
 
@@ -122,11 +145,17 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库保持一致，避免存量令牌失效 |
 | `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性判定） |
-| `STORAGE_PRESIGN_TTL_MINUTES` | `120` | 预签名有效期 |
+| `STORAGE_PRESIGN_TTL_MINUTES` | `120` | 预签名有效期；同时是上传租约的默认寿命（签发地址过期了租约也没意义） |
 | `STORAGE_MAX_PARTS` | `10000` | 单次上传最大分片数 |
 | `STORAGE_MAX_UPLOAD_MB` | `0` | 服务端接收路径的上限，`0` 为不限制（直传路径不受此限） |
 | `STORAGE_VERIFY_MAX_MB` | `0` | complete 阶段回读重算 sha256 的**单对象大小上限**，`0` 为不限制；超限返回 `hash_verify_too_large`，资产留在 pending，不置完成 |
 | `STORAGE_VERIFY_TIMEOUT_SECONDS` | `0` | 同一段回读的墙钟上限（秒），`0` 为不限制；超时返回 `verify_timeout`，同样不置完成 |
+| `STORAGE_PENDING_TTL_HOURS` | `72` | pending 按年龄回收的兜底窗口（小时）：过期未完成、无绑定的 pending 由 worker 回收 |
+| `STORAGE_UPLOAD_LEASE_MINUTES` | 跟随预签名有效期 | 单次上传租约（分钟）：`initiate` 落定、续传刷新；`0`/未配置即跟随 `STORAGE_PRESIGN_TTL_MINUTES` |
+| `STORAGE_USER_QUOTA_MB` / `STORAGE_SITE_QUOTA_MB` | `0` | 容量预算（MB）：complete 计真实字节，pending 计声明大小；`0` 为不限制；超限 `initiate` 回 `413 quota_exceeded` |
+| `STORAGE_USER_CONCURRENT_UPLOADS` / `STORAGE_SITE_CONCURRENT_UPLOADS` | `0` | 并发预算（进行中的 pending 数）：`0` 为不限制；超限回 `429 too_many_uploads`；只拦新建占位，不拦续传收尾 |
+| `STORAGE_ORPHAN_RETENTION_DAYS` | `7` | 孤儿对象保留期（天）：无引用的键首次发现超过该天数才搬隔离区；隔离不等于删除 |
+| `STORAGE_S3_SKIP_BUCKET_ENSURE` | `false` | 置 `true` 跳过启动建桶检查，用仅目标桶数据操作的服务凭据（最小权限）；桶由运维身份事先建好 |
 
 服务**刻意不设** `ReadTimeout`/`WriteTimeout`：整盘镜像与视频的上传/下载都可能远超 30 秒，
 全局超时会直接截断慢传输（单体当前的 30 秒限制即此原因）。需要收敛时按路由单独加超时。
@@ -145,6 +174,28 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 先 `BucketExists` 再 `MakeBucket`，并发下按"已存在"容忍，幂等）。
 桶不再由一次性的 `minio/mc` 初始化容器创建——该镜像已从 Docker Hub 撤下，拉不到会让整条部署链失败；
 桶归属服务本身，判定条件与"服务能否连上对象存储"完全一致，因此也不需要额外的启动顺序依赖。
+
+### 对象最小权限
+
+默认（上段）服务凭据需要建桶能力；生产用**仅目标桶的服务凭据**时置 `STORAGE_S3_SKIP_BUCKET_ENSURE=true`：
+服务只做目标桶内的数据操作（读写/删/分片/签名），`BucketExists`/`MakeBucket` 一律跳过，
+桶由运维的管理身份事先建好（管理身份与服务凭据分离，不共用）。跳过的是"保证桶存在"，
+不是"保证能读写"——读写失败仍在首次请求时显式报错，不会静默换存储语义。
+服务凭据的最小策略示例（仅目标桶，`<bucket>` 换实际名）：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+               "s3:AbortMultipartUpload", "s3:ListBucketMultipartUploads", "s3:ListMultipartUploadParts"],
+    "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"]
+  }]
+}
+```
+
+主仓 compose 需要改的变量见 `docs/main-repo-compose-vars.md`（只列清单，不动主仓文件）。
 
 ### 完成上传时的内容校验（P1 完整性约束）
 
@@ -176,9 +227,26 @@ go test ./... && go vet ./...
 未配置 `STORAGE_S3_ENDPOINT` 时走本地对象模式：`initiate` 返回 `direct_upload_url`，
 客户端 `PUT` 原始字节到该地址即完成入库，服务端边收边算 sha256。
 
+### 后台任务（上传回收与一致性核查）
+
+```bash
+storage-server worker   # 跑一次就退出：过期上传回收 + 双向对账，由 cron/systemd timer 周期触发
+```
+
+- **上传回收**：过期（租约到期；存量无租约行按 `created_at + STORAGE_PENDING_TTL_HOURS` 兜底）
+  且无绑定的 `pending` 才进候选。处置前重查绑定（候选与删除之间可能有人刚绑上），
+  再做双向核对：对象键前缀必须与声明 sha 对上（对不上只上报不动手）；
+  仍有其它资产行引用同一键（秒传去重共享）时只删行、不删字节；独占且对象存在才删字节再删行。
+- **一致性核查**：库→对象（`complete` 行是否真有字节；缺失的先禁发标记，不解绑不删行）与
+  对象→库（无引用的键记 `storage.orphaned_objects` 台账，超过保留期搬 `quarantine/` 隔离，**不自动删字节**）
+  双向进行。熔断：读错存在、或缺失多且占比过半（像整桶不可用）时只上报不标记。
+- 两条铁律：清理绝不动被绑定的资产；删字节前先隔离标记。"不知道"（读失败、键对不上、比例异常）
+  一律只上报不动手。实现见 `internal/maintenance`，口径单测见 `policy_test.go`。
+
 ## 数据库结构与迁移
 
-表结构在 `internal/store/migrations/*.up.sql`（基线 `000001_init.up.sql` + 审计表 `000002_audit_log.up.sql`），
+表结构在 `internal/store/migrations/*.up.sql`（基线 `000001_init.up.sql` + 审计表 `000002_audit_log.up.sql`
++ 生命周期 `000003_lifecycle.up.sql`：上传租约列、禁发位、孤儿台账），
 由 `internal/store` 在启动时应用（`Init` → `Migrate`）；每个版本一个事务，
 DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, applied_at)`。
 
@@ -210,6 +278,8 @@ DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, 
 | `PUT /api/storage/upload/stream/:assetId` | `asset.upload_streamed` |
 | `POST /api/storage/bind` | `binding.created` |
 | `DELETE /api/storage/bindings/:id` | `binding.removed` |
+| `POST /api/storage/assets/:id/block` | `asset.blocked` |
+| `POST /api/storage/assets/:id/unblock` | `asset.unblocked` |
 
 - `POST /api/storage/verify-hash` 是**刻意豁免**的写路由：它是读语义的探测与摘要回读校验，
   且探测允许匿名，写审计等于给只读探测开一个刷表入口（理由写在 `auditExempt`，守卫测试要求非空）；
