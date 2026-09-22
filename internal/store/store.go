@@ -40,6 +40,10 @@ type Asset struct {
 	// UploadExpiresAt 是上传租约到期时间：过期未完成的 pending 由后台清理任务回收。
 	// 存量 NULL 按 created_at + 默认 TTL 兜底（见 lifecycle.go 的回收查询），迁移不回填策略值。
 	UploadExpiresAt *time.Time `json:"upload_expires_at,omitempty"`
+	// ReclaimToken/ReclaimClaimedAt 是清理认领的持有标记：空表示无人认领。
+	// 只允许认领持有者删行；续租/完成/绑定会清掉它（主动方胜出），超时未落定可被接管。
+	ReclaimToken    string     `json:"-"`
+	ReclaimClaimedAt *time.Time `json:"-"`
 	// Blocked 是独立于 status 的禁发标记：status 只回答"内容是否验过"，
 	// Blocked 只回答"是否允许分发"（目录公开 ≠ 文件可分发）。解禁后原状态仍在。
 	Blocked       bool       `json:"blocked"`
@@ -96,11 +100,11 @@ func (s *Store) Init(ctx context.Context) error {
 	return err
 }
 
-const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,fail_reason,uploader_id,upload_expires_at,blocked,blocked_reason,blocked_at,created_at,completed_at"
+const assetCols = "id,sha256,size_bytes,declared_size,mime_type,file_name,object_key,status,multipart_upload_id,hash_verified,fail_reason,uploader_id,upload_expires_at,blocked,blocked_reason,blocked_at,created_at,completed_at,reclaim_token,reclaim_claimed_at"
 
 func scanAsset(row interface{ Scan(...any) error }) (Asset, error) {
 	var a Asset
-	err := row.Scan(&a.ID, &a.SHA256, &a.SizeBytes, &a.DeclaredSize, &a.MimeType, &a.FileName, &a.ObjectKey, &a.Status, &a.MultipartUploadID, &a.HashVerified, &a.FailReason, &a.UploaderID, &a.UploadExpiresAt, &a.Blocked, &a.BlockedReason, &a.BlockedAt, &a.CreatedAt, &a.CompletedAt)
+	err := row.Scan(&a.ID, &a.SHA256, &a.SizeBytes, &a.DeclaredSize, &a.MimeType, &a.FileName, &a.ObjectKey, &a.Status, &a.MultipartUploadID, &a.HashVerified, &a.FailReason, &a.UploaderID, &a.UploadExpiresAt, &a.Blocked, &a.BlockedReason, &a.BlockedAt, &a.CreatedAt, &a.CompletedAt, &a.ReclaimToken, &a.ReclaimClaimedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -145,7 +149,7 @@ func (s *Store) SetUploadSession(ctx context.Context, id, uploadID string) error
 // 只认 hash_verified=true 的行：完成态就是"可被秒传复用"的公开态，未验证的资产
 // 不能被任何调用方（包括将来新增的上传路径）推到这个状态上。
 func (s *Store) CompleteAsset(ctx context.Context, id string, size int64) error {
-	res, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET status='complete', size_bytes=$2, completed_at=now() WHERE id=$1 AND hash_verified", id, size)
+	res, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET status='complete', size_bytes=$2, completed_at=now(), reclaim_token='', reclaim_claimed_at=NULL WHERE id=$1 AND hash_verified", id, size)
 	if err != nil {
 		return err
 	}
@@ -176,7 +180,7 @@ func (s *Store) markHash(ctx context.Context, id string, verified bool, size int
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "UPDATE storage.assets SET hash_verified=$2 WHERE id=$1", id, verified); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE storage.assets SET hash_verified=$2, reclaim_token='', reclaim_claimed_at=NULL WHERE id=$1", id, verified); err != nil {
 		return err
 	}
 	if verified {
@@ -191,10 +195,20 @@ func (s *Store) markHash(ctx context.Context, id string, verified bool, size int
 }
 
 func (s *Store) Bind(ctx context.Context, b Binding) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO storage.bindings(id,asset_id,target_entity_id,target_kind,binding_role,created_by)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO storage.bindings(id,asset_id,target_entity_id,target_kind,binding_role,created_by)
 		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(asset_id,target_entity_id,binding_role) DO NOTHING`,
-		b.ID, b.AssetID, b.TargetEntityID, b.TargetKind, b.BindingRole, b.CreatedBy)
-	return err
+		b.ID, b.AssetID, b.TargetEntityID, b.TargetKind, b.BindingRole, b.CreatedBy); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE storage.assets SET reclaim_token='', reclaim_claimed_at=NULL WHERE id=$1", b.AssetID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Binding(ctx context.Context, id string) (Binding, error) {
@@ -246,7 +260,7 @@ func (s *Store) BindingsForEntityIDs(ctx context.Context, entityIDs []string) ([
 		args[i] = id
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT b.id,b.asset_id,b.target_entity_id,b.target_kind,b.binding_role,b.created_by,b.created_at,
-		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.fail_reason,a.uploader_id,a.upload_expires_at,a.blocked,a.blocked_reason,a.blocked_at,a.created_at,a.completed_at
+		a.id,a.sha256,a.size_bytes,a.declared_size,a.mime_type,a.file_name,a.object_key,a.status,a.multipart_upload_id,a.hash_verified,a.fail_reason,a.uploader_id,a.upload_expires_at,a.blocked,a.blocked_reason,a.blocked_at,a.created_at,a.completed_at,a.reclaim_token,a.reclaim_claimed_at
 		FROM storage.bindings b JOIN storage.assets a ON a.id=b.asset_id
 		WHERE b.target_entity_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY b.created_at DESC LIMIT 500`, args...)
 	if err != nil {
@@ -258,7 +272,7 @@ func (s *Store) BindingsForEntityIDs(ctx context.Context, entityIDs []string) ([
 		var f FileBinding
 		if err = rows.Scan(&f.ID, &f.AssetID, &f.TargetEntityID, &f.TargetKind, &f.BindingRole, &f.CreatedBy, &f.CreatedAt,
 			&f.Asset.ID, &f.Asset.SHA256, &f.Asset.SizeBytes, &f.Asset.DeclaredSize, &f.Asset.MimeType, &f.Asset.FileName, &f.Asset.ObjectKey,
-			&f.Asset.Status, &f.Asset.MultipartUploadID, &f.Asset.HashVerified, &f.Asset.FailReason, &f.Asset.UploaderID, &f.Asset.UploadExpiresAt, &f.Asset.Blocked, &f.Asset.BlockedReason, &f.Asset.BlockedAt, &f.Asset.CreatedAt, &f.Asset.CompletedAt); err != nil {
+			&f.Asset.Status, &f.Asset.MultipartUploadID, &f.Asset.HashVerified, &f.Asset.FailReason, &f.Asset.UploaderID, &f.Asset.UploadExpiresAt, &f.Asset.Blocked, &f.Asset.BlockedReason, &f.Asset.BlockedAt, &f.Asset.CreatedAt, &f.Asset.CompletedAt, &f.Asset.ReclaimToken, &f.Asset.ReclaimClaimedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, f)

@@ -34,22 +34,24 @@ func (s *Store) SiteUsage(ctx context.Context) (Usage, error) {
 }
 
 // SetUploadExpiry 设置上传租约到期时间；续传复用会话时刷新它，避免"传得慢就被回收"。
+// 续租即主动方胜出：同时清掉清理认领标记，持有令牌的清理在终删时会被条件挡住。
 func (s *Store) SetUploadExpiry(ctx context.Context, id string, expiresAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET upload_expires_at=$2 WHERE id=$1", id, expiresAt)
+	_, err := s.db.ExecContext(ctx, "UPDATE storage.assets SET upload_expires_at=$2, reclaim_token='', reclaim_claimed_at=NULL WHERE id=$1", id, expiresAt)
 	return err
 }
 
 // ReclaimCandidates 列出可回收的过期 pending：无绑定（被绑定的资产是编目事实 ary，
-// 清理绝不动）、非禁发、租约已过期。存量 NULL 租约按 created_at + 默认 TTL 兜底
-// （legacyCutoff 由调用方按配置算好传进来，SQL 里不写策略值）。
-// 返回按创建时间排序，调用方逐行做双向核对后再删（见 maintenance）。
-func (s *Store) ReclaimCandidates(ctx context.Context, now time.Time, legacyCutoff time.Time, limit int) ([]Asset, error) {
+// 清理绝不动）、非禁发、租约已过期、无有效认领持有。存量 NULL 租约按 created_at +
+// 默认 TTL 兜底（legacyCutoff 由调用方按配置算好传进来，SQL 里不写策略值）。
+// 只做候选列举：逐行处置前必须经 TryClaimReclaim 原子认领，认领失败即他人已接管或行已转活跃。
+func (s *Store) ReclaimCandidates(ctx context.Context, now time.Time, legacyCutoff time.Time, staleBefore time.Time, limit int) ([]Asset, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT "+assetCols+" FROM storage.assets a"+
 		" WHERE a.status='pending' AND NOT a.blocked"+
 		" AND NOT EXISTS (SELECT 1 FROM storage.bindings b WHERE b.asset_id=a.id)"+
 		" AND ((a.upload_expires_at IS NOT NULL AND a.upload_expires_at <= $1)"+
 		" OR (a.upload_expires_at IS NULL AND a.created_at <= $2))"+
-		" ORDER BY a.created_at ASC LIMIT $3", now, legacyCutoff, limit)
+		" AND (a.reclaim_token='' OR a.reclaim_claimed_at IS NULL OR a.reclaim_claimed_at <= $3)"+
+		" ORDER BY a.created_at ASC LIMIT $4", now, legacyCutoff, staleBefore, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/MoeclubM/metafusion-storage/internal/config"
 	"github.com/MoeclubM/metafusion-storage/internal/objects"
 	"github.com/MoeclubM/metafusion-storage/internal/store"
@@ -35,82 +37,122 @@ type CleanupReport struct {
 	ObjectAlreadyMissing int
 	SkippedBound         int
 	SkippedKeyMismatch   int
+	SkippedRevoked       int
 	ObjectErrors         int
 	RemovedKeys          []string
 	MismatchedKeys       []string
 }
 
 // RunCleanup 回收过期未完成的上传占位。每行的处置顺序是固定的：
-// 1. 重查绑定（候选查询与删除之间可能有人刚绑上）；
-// 2. 双向核对之键检查：对象键前缀必须与声明 sha 对上，否则这行指向了别人的字节；
-// 3. 查共享引用：仍有其它资产行（含 complete 秒传复用）指着同一键时只删行、不删字节；
-// 4. 独占且对象存在才删字节，删完再删行；对象本就不存在只删行。
-// 读失败（Exists/Remove 报错）时行与字节都保留——"不知道"不是"可以删"。
+// 1. 原子认领（状态 + 租约版本 + 无绑定 + 无有效认领）：失败即他人已接管或行已转活跃；
+// 2. 重查绑定（认领与终删之间可能有人刚绑上）；
+// 3. 双向核对之键检查：对象键前缀必须与声明 sha 对上，否则这行指向了别人的字节；
+// 4. 查共享引用：仍有其它资产行（含 complete 秒传复用）指着同一键时只删行、不删字节；
+// 5. 独占且对象存在才删字节，删完凭令牌删行；对象本就不存在凭令牌只删行。
+// 认领与终删都是单条语句的短事务，远程对象操作在两者之间、不包事务。
+// 终删复核全部条件：续租/完成会清令牌并改租约/状态，绑定会让无绑定复核失败——
+// 主动方胜出，终删返回未删除时记 SkippedRevoked。
+// 读失败（Exists/Remove 报错）时释放认领、行与字节都保留——"不知道"不是"可以删"，下次可重试。
 func RunCleanup(ctx context.Context, db *store.Store, objs *objects.Store, cfg config.Config) (CleanupReport, error) {
 	var rep CleanupReport
 	now := time.Now()
-	candidates, err := db.ReclaimCandidates(ctx, now, now.Add(-cfg.PendingTTL()), cleanupBatch)
+	legacyCutoff := now.Add(-cfg.PendingTTL())
+	staleBefore := now.Add(-store.ReclaimClaimTimeout)
+	candidates, err := db.ReclaimCandidates(ctx, now, legacyCutoff, staleBefore, cleanupBatch)
 	if err != nil {
 		return rep, err
 	}
 	rep.Candidates = len(candidates)
 	for _, a := range candidates {
-		bound, err := db.HasBindings(ctx, a.ID)
+		token := uuid.NewString()
+		claimed, ok, cerr := db.TryClaimReclaim(ctx, a.ID, now, legacyCutoff, token, staleBefore)
+		if cerr != nil {
+			rep.ObjectErrors++
+			continue
+		}
+		if !ok {
+			// 未认领到：候选列举后行已转活跃（续租/完成/绑定）或被另一 worker 接管。
+			rep.SkippedRevoked++
+			continue
+		}
+		release := func() { _ = db.ReleaseReclaimClaim(ctx, claimed.ID, token) }
+		bound, err := db.HasBindings(ctx, claimed.ID)
 		if err != nil {
 			rep.ObjectErrors++
+			release()
 			continue
 		}
 		if bound {
 			rep.SkippedBound++
+			release()
 			continue
 		}
-		if !keyMatchesSHA(a.ObjectKey, a.SHA256) {
+		if !keyMatchesSHA(claimed.ObjectKey, claimed.SHA256) {
 			rep.SkippedKeyMismatch++
 			if len(rep.MismatchedKeys) < reportListCap {
-				rep.MismatchedKeys = append(rep.MismatchedKeys, a.ObjectKey)
+				rep.MismatchedKeys = append(rep.MismatchedKeys, claimed.ObjectKey)
 			}
+			release()
 			continue
 		}
-		refs, err := db.ObjectKeyRefCount(ctx, a.ObjectKey)
+		refs, err := db.ObjectKeyRefCount(ctx, claimed.ObjectKey)
 		if err != nil {
 			rep.ObjectErrors++
+			release()
 			continue
 		}
 		if refs > 1 {
 			// 去重共享：complete 行正复用这份字节，清掉占位行即可，字节是别人的。
-			if err := db.DeleteAsset(ctx, a.ID); err != nil {
+			deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now, legacyCutoff)
+			if derr != nil {
 				rep.ObjectErrors++
+				release()
+				continue
+			}
+			if !deleted {
+				rep.SkippedRevoked++
+				release()
 				continue
 			}
 			rep.SharedRowsRemoved++
 			continue
 		}
-		exists, err := objs.Exists(ctx, a.ObjectKey)
+		exists, err := objs.Exists(ctx, claimed.ObjectKey)
 		if err != nil {
 			rep.ObjectErrors++
+			release()
 			continue
 		}
 		if !exists {
-			if err := db.DeleteAsset(ctx, a.ID); err != nil {
+			deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now, legacyCutoff)
+			if derr != nil {
 				rep.ObjectErrors++
+				release()
+				continue
+			}
+			if !deleted {
+				rep.SkippedRevoked++
+				release()
 				continue
 			}
 			rep.ObjectAlreadyMissing++
 			continue
 		}
-		if err := objs.Remove(ctx, a.ObjectKey); err != nil {
+		if err := objs.Remove(ctx, claimed.ObjectKey); err != nil {
 			rep.ObjectErrors++
+			release()
 			continue
 		}
-		if err := db.DeleteAsset(ctx, a.ID); err != nil {
-			// 字节已删、行还在：下一次对账会把该键判为孤儿并隔离，
-			// 不会自动二次删除，可观测、可恢复（隔离区）。
+		deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now, legacyCutoff)
+		if derr != nil || !deleted {
+			// 字节已删、行还在：行已转活跃（删前瞬间被续租/完成/绑定）或写库失败。
+			// complete 行挂着缺失的键由对账标禁发，pending 行下次按缺失键收尾，可观测、可恢复。
 			rep.ObjectErrors++
 			continue
 		}
 		rep.Reclaimed++
 		if len(rep.RemovedKeys) < reportListCap {
-			rep.RemovedKeys = append(rep.RemovedKeys, a.ObjectKey)
+			rep.RemovedKeys = append(rep.RemovedKeys, claimed.ObjectKey)
 		}
 	}
 	return rep, nil

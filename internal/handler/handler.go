@@ -308,23 +308,8 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 		return
 	}
 
-	// 配额只拦"新建占位"：续传是把已占的预算传完，不在此判定（见 quotaCheck）。
-	if quotasEnabled(h.cfg) {
-		u, uerr := h.db.UserUsage(ctx, p.ID)
-		if uerr != nil {
-			fail(c, 500, "module_error")
-			return
-		}
-		site, serr := h.db.SiteUsage(ctx)
-		if serr != nil {
-			fail(c, 500, "module_error")
-			return
-		}
-		if code, status := quotaCheck(u, site, in.FileSize, h.cfg); code != "" {
-			fail(c, status, code)
-			return
-		}
-	}
+	// 配额只拦"新建占位"：续传是把已占的预算传完，不在此判定。
+	// 预留与占位同事务（CreatePendingAsset 内锁序固定、锁内重查），并发初始化不再互相超发。
 	lease := time.Now().Add(h.cfg.UploadLease())
 	asset = store.Asset{
 		ID:              uuid.NewString(),
@@ -337,7 +322,19 @@ func (h *Handler) initiateUpload(c *gin.Context) {
 		UploaderID:      p.ID,
 		UploadExpiresAt: &lease,
 	}
-	if err = h.db.CreateAsset(ctx, asset); err != nil {
+	if quotasEnabled(h.cfg) {
+		if err = h.db.CreatePendingAsset(ctx, asset, quotaLimits(h.cfg)); err != nil {
+			switch {
+			case errors.Is(err, store.ErrQuotaExceeded):
+				fail(c, http.StatusRequestEntityTooLarge, "quota_exceeded")
+			case errors.Is(err, store.ErrTooManyUploads):
+				fail(c, http.StatusTooManyRequests, "too_many_uploads")
+			default:
+				fail(c, 500, "module_error")
+			}
+			return
+		}
+	} else if err = h.db.CreateAsset(ctx, asset); err != nil {
 		fail(c, 500, "module_error")
 		return
 	}
@@ -477,6 +474,20 @@ func (h *Handler) completeUpload(c *gin.Context) {
 		fail(c, 409, "size_mismatch")
 		return
 	}
+	// 未知大小（0 声明）按实际大小兑现：锁内重算预算，不足即明确拒绝，资产保持 pending。
+	if asset.DeclaredSize == 0 && quotasEnabled(h.cfg) {
+		if cerr := h.db.CheckCompleteCapacity(ctx, asset.UploaderID, asset.DeclaredSize, size, quotaLimits(h.cfg)); cerr != nil {
+			if errors.Is(cerr, store.ErrQuotaExceeded) {
+				_ = h.objects.AbortUpload(ctx, asset.ObjectKey, uploadID)
+				_ = h.objects.Remove(ctx, asset.ObjectKey)
+				_ = h.db.MarkHashMismatch(ctx, asset.ID, "quota_exceeded")
+				fail(c, http.StatusRequestEntityTooLarge, "quota_exceeded")
+				return
+			}
+			fail(c, 500, "module_error")
+			return
+		}
+	}
 	// 预签名路径的内容从未经过服务端：落定前必须整份回读、重算 sha256 再比对。
 	// 大小一致不足以证明内容一致——等长的另一份内容完全可能挂在同一个 sha256 键上。
 	started := time.Now()
@@ -572,6 +583,25 @@ func (h *Handler) streamUpload(c *gin.Context) {
 	if err != nil {
 		fail(c, 400, "upload_failed")
 		return
+	}
+	// 流式落定同样按声明兑现：声明为正必须与实际一致，否则刚写入的对象立即清除。
+	if asset.DeclaredSize > 0 && size != asset.DeclaredSize {
+		_ = h.objects.Remove(ctx, asset.ObjectKey)
+		fail(c, 409, "size_mismatch")
+		return
+	}
+	// 未知大小（0 声明）按实际大小兑现：锁内重算预算，不足即明确拒绝并清除刚写入的对象。
+	if asset.DeclaredSize == 0 && quotasEnabled(h.cfg) {
+		if cerr := h.db.CheckCompleteCapacity(ctx, asset.UploaderID, asset.DeclaredSize, size, quotaLimits(h.cfg)); cerr != nil {
+			_ = h.objects.Remove(ctx, asset.ObjectKey)
+			if errors.Is(cerr, store.ErrQuotaExceeded) {
+				_ = h.db.MarkHashMismatch(ctx, asset.ID, "quota_exceeded")
+				fail(c, http.StatusRequestEntityTooLarge, "quota_exceeded")
+				return
+			}
+			fail(c, 500, "module_error")
+			return
+		}
 	}
 	if err := h.db.MarkHashVerified(ctx, asset.ID, size); err != nil {
 		fail(c, 500, "module_error")

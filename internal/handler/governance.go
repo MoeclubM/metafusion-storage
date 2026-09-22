@@ -43,6 +43,16 @@ func quotasEnabled(cfg config.Config) bool {
 		cfg.UserConcurrentUploads > 0 || cfg.SiteConcurrentUploads > 0
 }
 
+// quotaLimits 把配置折成存储层的预留输入：零值档不限制，调用方只在 quotasEnabled 时调存储原子方法。
+func quotaLimits(cfg config.Config) store.QuotaLimits {
+	return store.QuotaLimits{
+		UserQuotaBytes: cfg.UserQuotaBytes(),
+		SiteQuotaBytes: cfg.SiteQuotaBytes(),
+		UserConcurrent: cfg.UserConcurrentUploads,
+		SiteConcurrent: cfg.SiteConcurrentUploads,
+	}
+}
+
 // quotaCheck 是配额的纯判定（便于离线固定口径）：并发看 pending 计数，容量看
 // complete 真实字节 + pending 声明大小 + 本次声明。返回空串表示通过。
 func quotaCheck(u, site store.Usage, fileSize int64, cfg config.Config) (string, int) {
