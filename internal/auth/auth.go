@@ -271,15 +271,14 @@ func parsePublicKey(raw string) (*rsa.PublicKey, error) {
 	if block == nil {
 		return nil, errors.New("AUTH_JWT_PUBLIC_KEY must be PEM or base64 PEM")
 	}
-	if key, err := parseRSAPublic(block.Bytes); err == nil {
-		return key, nil
+	if block.Type != "PUBLIC KEY" && block.Type != "RSA PUBLIC KEY" {
+		return nil, errors.New("AUTH_JWT_PUBLIC_KEY must be an RSA public key")
 	}
-	// 私钥也接受：只取其公钥部分，方便与 catalog 共用同一份配置。
-	priv, err := parseRSAPrivate(block.Bytes)
+	key, err := parseRSAPublic(block.Bytes)
 	if err != nil {
-		return nil, errors.New("AUTH_JWT_PUBLIC_KEY must be an RSA key")
+		return nil, errors.New("AUTH_JWT_PUBLIC_KEY must be an RSA public key")
 	}
-	return &priv.PublicKey, nil
+	return key, nil
 }
 
 func parseRSAPublic(der []byte) (*rsa.PublicKey, error) {
@@ -292,18 +291,6 @@ func parseRSAPublic(der []byte) (*rsa.PublicKey, error) {
 		return key, nil
 	}
 	return nil, errors.New("not an RSA public key")
-}
-
-func parseRSAPrivate(der []byte) (*rsa.PrivateKey, error) {
-	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
-		return key, nil
-	}
-	if parsed, err := x509.ParsePKCS8PrivateKey(der); err == nil {
-		if key, ok := parsed.(*rsa.PrivateKey); ok {
-			return key, nil
-		}
-	}
-	return nil, errors.New("not an RSA private key")
 }
 
 // Verify 校验令牌并返回身份；失败一律返回错误，调用方自己决定 401 与否。
