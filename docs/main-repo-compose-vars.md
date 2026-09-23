@@ -1,6 +1,8 @@
-# 主仓 compose 变量需求清单（存储最小权限与治理）
+# 主仓 Compose 变量清单（存储最小权限与治理）
 
-只列清单，不动主仓文件。主仓实施时按此修改 `deploy/docker-compose.yml` 的存储注入段。
+> **历史准备稿**：本页原为待实施的建议清单，不代表当前部署状态。主仓已接入四服务最小权限统一授权与校验脚本（`deploy/sql/roles-least-privilege.sql`、`deploy/sql/verify-role-isolation.sql`），Compose 使用 `STORAGE_DATABASE_URL`。当前权威口径和步骤见主仓 [database-roles.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/database-roles.md) 与主仓 SQL。
+
+以下仅保留此文件的来源背景与尚未纳入主仓统一方案的存储对象存储治理建议；不要照此说明改主仓 Compose。
 
 ## 必改（最小权限）
 

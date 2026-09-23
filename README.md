@@ -260,8 +260,7 @@ DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, 
 - 账本只记"这一版执行过"，不校验结构本身。手工删过表而账本还在时启动不会重建，
   这种情况删掉对应账本行（`DELETE FROM storage.schema_migrations WHERE version='000001_init'`）再重启。
 
-`sql/roles.example.sql` 是数据层隔离（B4）的准备件：给 `metafusion_storage` 角色**只授 `storage` schema**，
-**编排尚未启用**；手工执行该文件并把 `DATABASE_URL` 换成该角色即生效，代码侧不需要改动。
+`sql/roles.example.sql` 是本仓库数据层隔离的旧准备件，当前主仓库已有统一授权源 `deploy/sql/roles-least-privilege.sql`、验证脚本 `deploy/sql/verify-role-isolation.sql`，并在 compose 中通过 `STORAGE_DATABASE_URL` 为服务配置 `mf_storage` 角色。不要把本文件当作主仓库的一键部署入口或独立权威授权脚本；跨服务角色模型与落地步骤以主仓库 [database-roles.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/database-roles.md) 及上述统一 SQL 为准。
 审计表是例外：它在跨服务共用的 `audit` schema 里（可能由别的服务先建），因此该文件对 `audit`
 另授 `USAGE` + `SELECT, INSERT`，否则本服务的审计行会全部写失败（业务不受影响，但留痕静默缺失）。
 
