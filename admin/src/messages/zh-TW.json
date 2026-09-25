@@ -90,6 +90,7 @@
   "meta.description": "MetaFusion 儲存域的營運面：用量總覽、資產查詢、綁定解綁。",
   "meta.title": "儲存管理台 · MetaFusion",
   "nav.assets": "資產查詢",
+  "nav.backToHub": "管理中心",
   "nav.bindings": "綁定解綁",
   "nav.groupLabel": "儲存域管理台",
   "nav.overview": "用量總覽",

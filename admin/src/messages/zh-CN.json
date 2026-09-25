@@ -90,6 +90,7 @@
   "meta.description": "MetaFusion 存储域的运营面：用量总览、资产查询、绑定解绑。",
   "meta.title": "存储管理台 · MetaFusion",
   "nav.assets": "资产查询",
+  "nav.backToHub": "管理中心",
   "nav.bindings": "绑定解绑",
   "nav.groupLabel": "存储域管理台",
   "nav.overview": "用量总览",

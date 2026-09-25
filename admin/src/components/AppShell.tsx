@@ -3,11 +3,11 @@
 // 与主站同域同路径前缀，因此语言与主题沿用同一套 cookie / localStorage 口径。
 import React from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Badge, Icon } from "@/components/ui";
 import { useSession } from "@/components/SessionProvider";
 import { useI18n } from "@/shared/i18n/I18nProvider";
-import { BASE_PATH, SERVICE_NAME } from "@/lib/app";
+import { BASE_PATH } from "@/lib/app";
 import { locales } from "@/shared/i18n/routing";
 
 const NAV = [
@@ -20,10 +20,11 @@ export function AppShell({ subtitle, children }: { subtitle: string; children: R
   const { t, locale, setLocale } = useI18n();
   const { state } = useSession();
   const pathname = usePathname();
+  const router = useRouter();
 
   // usePathname 返回的是带 basePath 的完整路径，去掉前缀后才能与上面的 href 比。
   const rest = pathname.startsWith(BASE_PATH) ? pathname.slice(BASE_PATH.length) || "/" : pathname;
-  const current = rest === "" ? "/" : rest;
+  const current = rest.replace(/\/+$/, "") || "/";
 
   return (
     <div className="min-h-screen bg-background">
@@ -55,23 +56,15 @@ export function AppShell({ subtitle, children }: { subtitle: string; children: R
                 </span>
               </>
             ) : null}
-            <Badge tone="neutral">{SERVICE_NAME}</Badge>
-            <div className="flex items-center gap-1" role="group" aria-label={t("common.language")}>
-              {locales.map((loc) => (
-                <button
-                  key={loc}
-                  type="button"
-                  onClick={() => setLocale(loc)}
-                  aria-pressed={locale === loc}
-                  className={
-                    "rounded-chip border px-2 py-0.5 font-mono text-[11px] transition-colors " +
-                    (locale === loc ? "border-primary text-primary" : "border-line text-text-muted hover:bg-surfaceHover")
-                  }
-                >
-                  {loc}
-                </button>
-              ))}
-            </div>
+            <a href="/admin" className="rounded-control border border-line px-3 py-2 text-xs text-text-body hover:bg-surfaceHover">
+              {t("nav.backToHub")}
+            </a>
+            <label className="flex items-center gap-2 text-xs text-text-muted">
+              <span className="sr-only sm:not-sr-only">{t("common.language")}</span>
+              <select value={locale} onChange={(e) => setLocale(e.target.value as typeof locale)} className="rounded-control border border-line bg-surface px-2 py-2 text-xs text-text-strong">
+                {locales.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+              </select>
+            </label>
           </div>
         </div>
       </header>
@@ -88,7 +81,13 @@ export function AppShell({ subtitle, children }: { subtitle: string; children: R
 
       <div className="mx-auto flex max-w-page flex-col gap-6 px-4 py-6 lg:flex-row">
         <nav className="shrink-0 lg:w-52" aria-label={t("nav.groupLabel")}>
-          <ul className="flex gap-1 overflow-x-auto lg:flex-col lg:overflow-visible">
+          <div className="rounded-control border border-line bg-surfaceSubtle p-3 lg:hidden">
+            <label htmlFor="storage-admin-section" className="mb-2 block text-xs font-medium text-text-muted">{t("nav.groupLabel")}</label>
+            <select id="storage-admin-section" value={current} onChange={(e) => router.push(e.target.value)} className="w-full rounded-control border border-line bg-surface px-3 py-2.5 text-sm text-text-strong">
+              {NAV.map((item) => <option key={item.href} value={item.href}>{t(item.key)}</option>)}
+            </select>
+          </div>
+          <ul className="hidden rounded-control border border-line bg-surfaceSubtle p-2 lg:sticky lg:top-24 lg:flex lg:flex-col">
             {NAV.map((item) => {
               const active = current === item.href;
               return (
@@ -97,10 +96,10 @@ export function AppShell({ subtitle, children }: { subtitle: string; children: R
                     href={item.href}
                     aria-current={active ? "page" : undefined}
                     className={
-                      "flex items-center gap-2 rounded-control border px-3 py-2 text-xs transition-colors " +
+                      "flex items-center gap-3 rounded-control px-3 py-2.5 text-sm transition-colors " +
                       (active
-                        ? "border-primary/40 bg-primary/10 text-primary"
-                        : "border-transparent text-text-muted hover:bg-surfaceHover hover:text-text-body")
+                        ? "bg-primary/15 font-semibold text-primary"
+                        : "text-text-muted hover:bg-surfaceHover hover:text-text-body")
                     }
                   >
                     <Icon name={item.icon} className="w-4 h-4" />

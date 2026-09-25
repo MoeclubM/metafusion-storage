@@ -90,6 +90,7 @@
   "meta.description": "Operations for the MetaFusion storage domain: usage, asset lookup, binding removal.",
   "meta.title": "Storage Console · MetaFusion",
   "nav.assets": "Assets",
+  "nav.backToHub": "Admin center",
   "nav.bindings": "Bindings",
   "nav.groupLabel": "Storage console",
   "nav.overview": "Usage",
