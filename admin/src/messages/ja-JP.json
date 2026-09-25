@@ -90,6 +90,7 @@
   "meta.description": "MetaFusion ストレージ領域の運用画面：使用量の概要、アセット照会、バインディング解除。",
   "meta.title": "ストレージ管理コンソール · MetaFusion",
   "nav.assets": "アセット照会",
+  "nav.backToHub": "管理センター",
   "nav.bindings": "バインディング解除",
   "nav.groupLabel": "ストレージ管理コンソール",
   "nav.overview": "使用量の概要",
