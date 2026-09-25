@@ -223,8 +223,13 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 
 	// 其余按 uuid 查库的入口同理：非法字面量必须回 404，而不是把 pq 的
 	// uuid 解析错误兜成 500（线上可直接复现这个 500）。
+	//
+	// content 这条同时证明"读路由是可选鉴权"：匿名请求能走到 handler 才有这个 404，
+	// 挂成 v.Required() 就会在这里变成 401，而浏览器加载 <img src> 不带任何凭据，
+	// 自托管封面会全站破图（真的可见性判定由 asset_content_cover_test.go 覆盖）。
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodGet, "/api/storage/assets/not-a-uuid", ""},
+		{http.MethodGet, "/api/storage/assets/not-a-uuid/content", ""},
 		{http.MethodGet, "/api/storage/download/not-a-uuid", ""},
 		{http.MethodPost, "/api/storage/verify-hash", "{\"asset_id\":\"not-a-uuid\"}"},
 	} {

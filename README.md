@@ -39,7 +39,7 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | POST | `/assets/{id}/block` | 审核者 | 禁发：只翻禁发位，不删绑定、不改校验状态，误禁可逆 |
 | POST | `/assets/{id}/unblock` | 审核者 | 解禁：原状态即恢复分发资格（仍需满足另两态） |
 | GET | `/assets/{id}` | 可读 | 文件元数据 + 绑定列表 |
-| GET | `/assets/{id}/content` | 可读 | **原样**内联分发对象内容（不转码）：给目录数据里需要长期引用、能被 `<img>` 直接加载的地址用；`download` 在对象存储模式下只回预签名地址（会过期、Host 是对象存储端点），不能当稳定地址 |
+| GET | `/assets/{id}/content` | 可读（允许匿名） | **原样**内联分发对象内容（不转码）：给目录数据里需要长期引用、能被 `<img>` 直接加载的地址用；`download` 在对象存储模式下只回预签名地址（会过期、Host 是对象存储端点），不能当稳定地址。位图等展示类型走 `inline`，脚本可执行类型走 `attachment`；响应带 `ETag`（内容摘要）并支持 `If-None-Match` → `304` |
 | GET | `/entities/{id}/files` | 实体可见 | 「这个介质/轨道/表达上挂了哪些文件」入口 |
 | GET | `/download/{asset_id}` | 可读 | 对象存储模式返回预签名下载地址；本地模式直接流式下发 |
 | POST | `/verify-hash` | 可读 / 按 asset 校验需登录 | 只给 sha256 = 秒传探测（只认 `hash_verified=true` 的资产）；给 asset_id = 读回对象重算摘要并与声明比对，同样受回读上限约束 |
@@ -48,6 +48,25 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 读取可见性的口径只有一条：**上传者本人或审核者直通，其余人只要任一绑定目标实体可见即可读**。
 下载、元数据读取与哈希校验共用这一判定，避免同一份文件在不同接口上出现「能下载不能预览」的差异；
 `/assets/{id}/content` 也走同一判定（响应只进私有缓存：可见性按请求判定，不能被共享缓存复用）。
+
+### 内容端点的缓存与条件请求
+
+`/assets/{id}/content` 会被浏览器反复加载（目录列表、详情页、`<img>` 重排），因此这一条的响应头
+按"可以当图片缓存"来配，取舍全部服务于同一件事：**可见性只能按请求判定**（存储侧不缓存目录结论，
+也不直连目录库）。
+
+| 头 | 取值 | 为什么 |
+| --- | --- | --- |
+| `Cache-Control` | `private, max-age=300` | 只进浏览器私有缓存。**不给 `public`、不挂 CDN 共享缓存**：共享缓存会把一次成功鉴权的响应复用给无权者，等于把可见性烤死在缓存里。300 秒是接受窗口——副本在窗口内直接复用，不会再回到鉴权这一步 |
+| `ETag` | 资产 `sha256`（带引号） | 内容寻址让摘要本身就是版本号：一份资产的字节由它的 sha256 唯一确定，换内容等于换资产，不需要额外的版本列 |
+| `If-None-Match` | 命中 → `304`（无正文） | 命中的请求既不读对象存储也不传字节；`304` 仍回显 `ETag` 与 `Cache-Control`，但描述"这一份正文长什么样"的头（`Content-Type` / `Content-Length` / `Content-Disposition`）一律不出现 |
+| `Content-Type` | 按资产声明的 mime | 声明缺失或退化成 `application/octet-stream` 时按扩展名、再按内容嗅探补齐；一律 `octet-stream` 会让 `<img>` 破图 |
+| `Content-Disposition` | 展示类型 `inline`，其余 `attachment` | 位图/音视频/纯文本/PDF 等白名单类型才内联；`text/html`、`image/svg+xml` 这些会被当文档渲染的一律附件（审计 S-3，见 `internal/handler/mime_policy.go`） |
+| `X-Content-Type-Options` | `nosniff` | 声明类型与实际内容不符时，不给浏览器"按内容重新判定"的机会 |
+
+条件请求**不是第二条放行路径**：可见性判定先跑，判定不过就是 `404 not_found`（与 `download` 同码同体），
+不会因为客户端手上的摘要与内容对得上就回 `304`，`404` 上也不带 `ETag`（否则探测者能靠它比对内容换没换）。
+`pending`（内容还没验完）与禁发（`blocked`）同理，一律 `404`，不出内容也不出 `304`。
 
 ### 三态门禁：校验完成 / 目录公开 / 允许分发
 
@@ -128,6 +147,11 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 `binding_role` 用字段码表达用途，默认 `master_archive`，取值需匹配 `^[a-z][a-z0-9_]{0,31}$`，
 不设封闭枚举：`track_audio`（分轨音频）、`disc_image`（整碟镜像）、`video`、`scans`（扫描件）、
 `subtitle`、`ebook` 等由运维与编目约定，新增用途不需要改代码。
+
+`cover_image` 是目录侧自托管封面的预设：一张图一条绑定，`target_entity_id` 就是引用这张图的
+目录实体，稳定地址是 `GET /api/storage/assets/{id}/content`，目录侧把它写进
+`pictures[].url`、把同一个资产 uuid 写进 `pictures[].asset_id`。展示顺序由目录侧的
+`pictures[]` 数组顺序决定，存储侧不另存排序列（`storage.bindings` 没有 position 列）。
 
 ## 环境变量
 

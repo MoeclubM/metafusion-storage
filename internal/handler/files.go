@@ -139,6 +139,10 @@ func (h *Handler) objectReadFailed(c *gin.Context, asset store.Asset, err error)
 // STORAGE_S3_PUBLIC_ENDPOINT 时浏览器根本不可达）；目录里 pictures[].url 这类需要长期可引用、
 // 且要能被 <img> 直接加载的地址，只能由本服务每次重新鉴权后转发原档。
 // 可见性判定与 download 完全同一处（readable），不可读一律 404，不区分"无权限"与"不存在"。
+//
+// 响应头按"能被浏览器反复加载"来配（见 contentCacheHeaders）：类型取资产登记的 mime（缺失才按
+// 扩展名/内容嗅探兜底，不给一律 octet-stream）、位图走 inline 而不是 attachment（后者会让 <img>
+// 变成下载）、Cache-Control 只进私有缓存、ETag 用内容摘要并支持 If-None-Match → 304。
 func (h *Handler) assetContent(c *gin.Context) {
 	if !validID(c.Param("id")) {
 		fail(c, 404, "not_found")
@@ -154,8 +158,28 @@ func (h *Handler) assetContent(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
-	if h.denyUnreadable(c, asset) || asset.Status != "complete" {
+	// 两步必须分开写：denyUnreadable 自己已经落过响应（404 或 503），
+	// 把它和状态判断并成一个 if 再 fail，会给同一次请求追加第二个 JSON 体
+	// （`{"error":"not_found"}{"error":"not_found"}`，按码分支的 bot 直接解析失败），
+	// 而且 503 的响应体会被尾巴上的 404 体污染成"两个码"。
+	// pending 与不可读的对外码都是 404，分开写不改变任何结论。
+	if h.denyUnreadable(c, asset) {
+		return
+	}
+	if asset.Status != "complete" {
 		fail(c, 404, "not_found")
+		return
+	}
+	etag := contentCacheHeaders(c, asset)
+	// 条件请求命中就到此为止：封面会被反复加载（列表滚回来、详情页重进、<img> 重排），
+	// 不接 304 的话每一次加载都要把原档从对象存储整份读一遍再发一遍字节。
+	//
+	// 位置是硬要求：可见性判定（denyUnreadable）已经在上面做完，304 不是第二条放行路径——
+	// 一份失去可见绑定的资产在这里照样 404，哪怕客户端手上的摘要与内容完全对得上。
+	// 客户端缓存里那份副本最多活 max-age 秒（见 contentCacheHeaders）：这是选择"按请求鉴权
+	// + 私有短缓存"时就接受的窗口，与本轮加不加 ETag 无关（不加的话副本照样存在，只是每次都回源）。
+	if etagMatches(c.GetHeader("If-None-Match"), etag) {
+		c.Status(http.StatusNotModified)
 		return
 	}
 	obj, size, err := h.objects.Open(ctx, asset.ObjectKey)
@@ -179,10 +203,64 @@ func (h *Handler) assetContent(c *gin.Context) {
 		// 附件分支保留真实类型：下载到本地后系统仍能正确识别，收口靠 disposition + nosniff。
 		c.Header("Content-Disposition", contentDisposition(asset.FileName))
 	}
-	c.Header("Cache-Control", "private, max-age="+strconv.Itoa(contentCacheSeconds))
 	// 交给 ServeContent：Range 与 If-Modified-Since 由它处理，大文件不用整份读进内存。
 	http.ServeContent(c.Writer, c.Request, asset.FileName, time.Time{}, obj)
 	_ = size
+}
+
+// contentCacheHeaders 写内容端点的缓存与条件请求头。
+//
+// 必须在**打开对象之前**就设好：命中 If-None-Match 时响应只有头没有正文，
+// 而 RFC 9110 §9.4.1 要求 304 带上它在 200 里也会发的那几项（Cache-Control、ETag…），
+// 否则缓存里的副本失去再验证依据。
+func contentCacheHeaders(c *gin.Context, asset store.Asset) string {
+	// 只进私有缓存：可见性是按请求问目录服务判的，共享缓存（CDN/反代）会把一次
+	// 成功鉴权的响应复用给无权者，等于把可见性烤死在缓存里。max-age 给一个短窗口，
+	// 让同一页面里的反复加载不必每次回到服务端。
+	c.Header("Cache-Control", "private, max-age="+strconv.Itoa(contentCacheSeconds))
+	etag := assetETag(asset)
+	c.Header("ETag", etag)
+	return etag
+}
+
+// assetETag 给出这份内容的实体标签。
+//
+// 内容寻址让摘要本身就是版本号：一份资产的字节由它的 sha256 唯一确定
+// （assets_sha256 上有唯一索引），换内容等于换资产，因此不需要额外的版本列，
+// 也不必回答“什么时候该让标签变”。
+func assetETag(asset store.Asset) string {
+	sum := strings.TrimSpace(asset.SHA256)
+	if sum == "" {
+		// 库里 sha256 是 NOT NULL，走到这里只可能是行被外部改坏；退化到资产 id 至少保证
+		// 标签非空且语法合法（ETag: "" 不是合法的 entity-tag）。
+		sum = asset.ID
+	}
+	return `"` + sum + `"`
+}
+
+// etagMatches 判定条件请求的 If-None-Match 是否命中：支持 `*`、逗号多值与弱标签（W/）。
+// 实体标签按 RFC 9110 §8.8.3 是不透明串，比对区分大小写；只有 `W/` 前缀在比较时去掉。
+//
+// 与 readable 同一条判定的另一面：命中与否只在**放行已经成立之后**才看，
+// 所以这里宽松最多让一次回源省下来，严格不会多拦住谁——权限从来不靠标签比对收口。
+func etagMatches(header, etag string) bool {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return false
+	}
+	if header == "*" {
+		return true
+	}
+	want := strings.Trim(etag, `"`)
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		candidate = strings.TrimPrefix(candidate, "W/")
+		candidate = strings.TrimPrefix(candidate, "w/")
+		if strings.Trim(candidate, `"`) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // inlineMime 决定内联响应的内容类型：优先资产登记的 mime（上传时的 mime_type），
@@ -279,7 +357,11 @@ func (h *Handler) download(c *gin.Context) {
 		return
 	}
 	// 不可读一律回 404：不区分"无权限"与"不存在"，避免泄露他人上传的存在性。
-	if h.denyUnreadable(c, asset) || asset.Status != "complete" {
+	// 与 content 同一处判定；两步分开写的原因见 assetContent（denyUnreadable 已经落过响应）。
+	if h.denyUnreadable(c, asset) {
+		return
+	}
+	if asset.Status != "complete" {
 		fail(c, 404, "not_found")
 		return
 	}
