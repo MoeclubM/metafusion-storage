@@ -91,7 +91,13 @@ export function deleteBinding(bindingId: string): Promise<{ ok: boolean }> {
   return apiDelete<{ ok: boolean }>("/bindings/" + encodeURIComponent(bindingId));
 }
 
-/** 内联预览地址：服务端每次重新鉴权后原样转发对象内容（不转码、可被 <img> 直接加载）。 */
+/**
+ * 内联预览地址：服务端每次重新鉴权后原样转发对象内容（不转码、可被 <img> 直接加载）。
+ *
+ * 这一条就是目录侧自托管封面的稳定地址：绑定用途 `cover_image`，`pictures[].url` 写
+ * `/api/storage/assets/{id}/content`，目录侧的 `pictures[].asset_id` 存同一个 uuid。
+ * 响应只进浏览器私有缓存（可见性按请求判定），所以后台点开它拿到的仍是"这次请求算出来"的结论。
+ */
 export function assetContentUrl(assetId: string): string {
   return "/api/storage/assets/" + encodeURIComponent(assetId) + "/content";
 }

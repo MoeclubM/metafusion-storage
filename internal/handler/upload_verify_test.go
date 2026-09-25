@@ -42,6 +42,12 @@ type uploadHarness struct {
 
 	local bool
 	s3    *fakeHarnessS3
+
+	// visible 决定假目录服务对某个实体回什么：默认全部可见，用例不被可见性边界挡住；
+	// 需要"绑定后来变不可见"的用例在请求发出前改它即可（判定发生在每次读请求里，
+	// 正是真实服务的形状）。绑定的目标必须在绑定时可见（bind 会问目录），所以这类用例
+	// 先绑再翻。
+	visible func(entityID string) bool
 }
 
 func newUploadHarness(t *testing.T, useS3 bool) *uploadHarness {
@@ -103,9 +109,17 @@ func newUploadHarnessWith(t *testing.T, useS3 bool, verifyMaxMB int) *uploadHarn
 		t.Fatalf("对象模式不符: local=%v useS3=%v", objs.Local(), useS3)
 	}
 
-	// 目录服务只被问可见性：所有实体都可见，用例不被可见性边界挡住。
+	// 目录服务只被问可见性：默认所有实体都可见，用例不被可见性边界挡住；
+	// 换了 h.visible 的用例按实体 id 得到 200 或 404（404 = 目录明确回答不可见，
+	// 与"问不到上游"区分开，后者由 catalog_upstream_test.go 覆盖）。
 	cat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "kind": "track"})
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/catalog/entities/"), "/resolve")
+		id = strings.TrimSuffix(id, "/identity")
+		if h.visible != nil && !h.visible(id) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "kind": "track"})
 	}))
 	t.Cleanup(cat.Close)
 
