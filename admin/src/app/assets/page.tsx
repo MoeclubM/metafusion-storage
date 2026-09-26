@@ -96,7 +96,7 @@ export default function AssetsPage() {
     {can(PERMISSION_ASSET_MODERATE) ? <Card>
       <SectionHeader title={t("assets.listTitle")} actions={<Button variant="ghost" onClick={() => void loadList(offset, filter)} busy={listLoading}>{t("common.refresh")}</Button>} />
       <div className="flex flex-wrap items-end gap-2">
-        <div className="min-w-40 flex-1"><TextInput value={name} onChange={setName} label={t("assets.filterName")} onSubmit={() => void loadList(0, { status, name: name.trim() })} /></div>
+        <div className="min-w-40 flex-1"><TextInput value={name} onChange={setName} label={t("assets.filterName")} placeholder={t("assets.filterName")} onSubmit={() => void loadList(0, { status, name: name.trim() })} /></div>
         <label className="flex flex-col gap-1 text-xs text-text-muted">{t("assets.filterStatus")}
           <select className="min-h-10 rounded-control border border-line bg-surface px-3 text-text-body" value={status} onChange={(event) => setStatus(event.target.value)}>
             <option value="">{t("assets.allStatus")}</option><option value="complete">{t("assets.status.complete")}</option><option value="pending">{t("assets.status.pending")}</option>
