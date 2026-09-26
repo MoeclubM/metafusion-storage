@@ -59,18 +59,19 @@ func signToken(t *testing.T, key *rsa.PrivateKey, kid, role string) string {
 }
 
 // signTokenWith 是带授权声明的签发：groups/permissions 与账号服务一致
-// （admin 组的权限码是 *）。两者都为空即"老令牌"——没有权限码，只能按角色兜底。
+// （admin 组的权限码是 *）。
 func signTokenWith(t *testing.T, key *rsa.PrivateKey, kid, role string, groups, perms []string) string {
 	t.Helper()
 	payload := jwt.MapClaims{
 		"sub":                "11111111-1111-1111-1111-111111111111",
 		"preferred_username": "kana",
-		"role":               role,
+		"token_use":          "session",
 		"iss":                testIssuer,
 		"aud":                testAudience,
 		"exp":                time.Now().Add(10 * time.Minute).Unix(),
 		"iat":                time.Now().Unix(),
 	}
+	_ = role
 	if len(groups) > 0 {
 		payload["groups"] = groups
 	}
@@ -115,7 +116,7 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"id": p.ID, "role": p.Role, "groups": p.Groups,
+			"id": p.ID, "groups": p.Groups,
 			"moderate": p.Can(auth.PermissionAssetModerate),
 		})
 	})
@@ -128,7 +129,6 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 
 	var got struct {
 		ID       string   `json:"id"`
-		Role     string   `json:"role"`
 		Groups   []string `json:"groups"`
 		Moderate bool     `json:"moderate"`
 	}
@@ -144,21 +144,20 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 	}
 	got = struct {
 		ID       string   `json:"id"`
-		Role     string   `json:"role"`
 		Groups   []string `json:"groups"`
 		Moderate bool     `json:"moderate"`
 	}{}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("解析响应失败: %v", err)
 	}
-	if got.ID == "" || got.Role != "user" || len(got.Groups) != 1 || got.Groups[0] != "storage_moderator" {
+	if got.ID == "" || len(got.Groups) != 1 || got.Groups[0] != "storage_moderator" {
 		t.Fatalf("身份还原不符: %+v", got)
 	}
 	if !got.Moderate {
 		t.Fatalf("令牌里的 storage.asset.moderate 未被认账: %+v", got)
 	}
 
-	// 老令牌（无 groups/permissions）：admin 角色仅保留历史上传边界，治理码不再凭角色放行（S01）。
+	// 无 permissions 的身份不能取得审核码。
 	req = httptest.NewRequest(http.MethodGet, "/api/probe", nil)
 	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "admin"))
 	w = httptest.NewRecorder()
@@ -168,13 +167,12 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 	}
 	got = struct {
 		ID       string   `json:"id"`
-		Role     string   `json:"role"`
 		Groups   []string `json:"groups"`
 		Moderate bool     `json:"moderate"`
 	}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
-	if got.Role != "admin" || got.Moderate {
-		t.Fatalf("S01 起老令牌不再凭 admin 放行治理码: %+v", got)
+	if got.Moderate {
+		t.Fatalf("缺少权限码不应放行治理码: %+v", got)
 	}
 }
 

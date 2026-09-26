@@ -1,6 +1,5 @@
 "use client";
-// 用量总览：GET /api/storage/stats 只有 assets 与 bytes 两个字段。
-// **没有配额字段**，因此这里不画占用率进度条——那种图的分母只能靠编，属于"看起来专业、实际在撒谎"。
+// 用量总览：GET /api/storage/stats 返回完成态用量、待完成与禁发数。
 import React, { useCallback, useEffect, useState } from "react";
 import { Button, Card, Icon, Notice, SectionHeader, Spinner, useMessage } from "@/components/ui";
 import { useSession } from "@/components/SessionProvider";
@@ -73,7 +72,7 @@ export default function OverviewPage() {
 
           {stats ? (
             <>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-card border border-line bg-surfaceSubtle p-4">
                   <div className="text-[11px] uppercase tracking-wide text-text-faint">{t("overview.assetsLabel")}</div>
                   <div className="mt-2 font-mono text-2xl text-text-strong">{formatInt(stats.assets, locale)}</div>
@@ -86,6 +85,14 @@ export default function OverviewPage() {
                   <div className="mt-1 font-mono text-[11px] text-text-faint">
                     {t("overview.bytesRaw", { bytes: formatInt(stats.bytes, locale) })}
                   </div>
+                </div>
+                <div className="rounded-card border border-line bg-surfaceSubtle p-4">
+                  <div className="text-[11px] uppercase tracking-wide text-text-faint">{t("overview.pendingLabel")}</div>
+                  <div className="mt-2 font-mono text-2xl text-text-strong">{formatInt(stats.pending, locale)}</div>
+                </div>
+                <div className="rounded-card border border-line bg-surfaceSubtle p-4">
+                  <div className="text-[11px] uppercase tracking-wide text-text-faint">{t("overview.blockedLabel")}</div>
+                  <div className="mt-2 font-mono text-2xl text-text-strong">{formatInt(stats.blocked, locale)}</div>
                 </div>
               </div>
 

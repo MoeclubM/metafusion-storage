@@ -55,17 +55,14 @@ func TestKeyMatchesSHA(t *testing.T) {
 func TestPendingExpiredBoundary(t *testing.T) {
 	now := time.Now()
 	lease := now.Add(-time.Minute)
-	if !pendingExpired(nil, now.Add(-72*time.Hour), now, 72*time.Hour) {
-		t.Fatal("NULL 租约的存量行应按 created_at + 默认 TTL 兜底")
+	if pendingExpired(nil, now) {
+		t.Fatal("缺租约的行不可回收")
 	}
-	if pendingExpired(nil, now.Add(-time.Hour), now, 72*time.Hour) {
-		t.Fatal("72 小时内的存量行不应回收")
-	}
-	if !pendingExpired(&lease, now.Add(-time.Hour), now, 72*time.Hour) {
+	if !pendingExpired(&lease, now) {
 		t.Fatal("租约已过期的行应回收")
 	}
 	fresh := now.Add(time.Hour)
-	if pendingExpired(&fresh, now.Add(-100*time.Hour), now, 72*time.Hour) {
+	if pendingExpired(&fresh, now) {
 		t.Fatal("租约未到期的行不应回收，即使创建时间很老")
 	}
 }

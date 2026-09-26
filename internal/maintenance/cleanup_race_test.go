@@ -103,7 +103,7 @@ func TestCleanupSkipsActiveAfterCandidate(t *testing.T) {
 		f := newCleanupFixture(t)
 		a := f.expiredPending("renew", true)
 		now := time.Now()
-		if _, err := f.db.ReclaimCandidates(f.ctx, now, now.Add(-f.cfg.PendingTTL()), now.Add(-store.ReclaimClaimTimeout), 100); err != nil {
+		if _, err := f.db.ReclaimCandidates(f.ctx, now, now.Add(-store.ReclaimClaimTimeout), 100); err != nil {
 			t.Fatalf("candidates: %v", err)
 		}
 		if err := f.db.SetUploadExpiry(f.ctx, a.ID, time.Now().Add(2*time.Hour)); err != nil {
@@ -125,7 +125,7 @@ func TestCleanupSkipsActiveAfterCandidate(t *testing.T) {
 		f := newCleanupFixture(t)
 		a := f.expiredPending("complete", true)
 		now := time.Now()
-		if _, err := f.db.ReclaimCandidates(f.ctx, now, now.Add(-f.cfg.PendingTTL()), now.Add(-store.ReclaimClaimTimeout), 100); err != nil {
+		if _, err := f.db.ReclaimCandidates(f.ctx, now, now.Add(-store.ReclaimClaimTimeout), 100); err != nil {
 			t.Fatalf("candidates: %v", err)
 		}
 		if err := f.db.MarkHashVerified(f.ctx, a.ID, 10); err != nil {
@@ -150,7 +150,7 @@ func TestCleanupSkipsActiveAfterCandidate(t *testing.T) {
 		f := newCleanupFixture(t)
 		a := f.expiredPending("bind", true)
 		now := time.Now()
-		if _, err := f.db.ReclaimCandidates(f.ctx, now, now.Add(-f.cfg.PendingTTL()), now.Add(-store.ReclaimClaimTimeout), 100); err != nil {
+		if _, err := f.db.ReclaimCandidates(f.ctx, now, now.Add(-store.ReclaimClaimTimeout), 100); err != nil {
 			t.Fatalf("candidates: %v", err)
 		}
 		if err := f.db.Bind(f.ctx, store.Binding{ID: uuid.NewString(), AssetID: a.ID,
@@ -252,7 +252,7 @@ func TestCleanupCrashRecovery(t *testing.T) {
 	f := newCleanupFixture(t)
 	a := f.expiredPending("crash", true)
 	now := time.Now()
-	if _, ok, err := f.db.TryClaimReclaim(f.ctx, a.ID, now, now.Add(-f.cfg.PendingTTL()), "crashed-holder", now.Add(-store.ReclaimClaimTimeout)); err != nil || !ok {
+	if _, ok, err := f.db.TryClaimReclaim(f.ctx, a.ID, now, "crashed-holder", now.Add(-store.ReclaimClaimTimeout)); err != nil || !ok {
 		t.Fatalf("模拟崩溃前认领应成功 ok=%v err=%v", ok, err)
 	}
 	raw := testutil.Database(t)

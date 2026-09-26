@@ -16,7 +16,7 @@ type State =
 
 type Ctx = {
   state: State;
-  /** 与服务端同口径的权限判定（含 * 通配与老令牌的角色兜底），见 lib/session.ts。 */
+  /** 与服务端同口径的权限码判定（含 * 通配），见 lib/session.ts。 */
   can: (code: string) => boolean;
   reload: () => Promise<void>;
 };

@@ -61,6 +61,14 @@ export function apiDelete<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
 
+export function apiPost<T>(path: string, body?: object): Promise<T> {
+  return request<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
 /**
  * 把接口错误翻成界面文案。服务端的错误码是稳定的（见 internal/handler 的 fail 调用），
  * 所以按码分支即可；opts.notFound 用来在"404 有特定含义"的位置换一句更贴切的话。

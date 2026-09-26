@@ -23,37 +23,24 @@ import (
 )
 
 // Principal 是验签后的调用者身份。只信令牌里的字段：
-// Role 是历史兼容字段（admin/editor/user），Groups 是组码、Permissions 是按组展开后的
-// 权限码集合，均由账号服务随令牌与 /api/auth/me 下发——字段名与签发侧逐字一致
+// Groups 是组码、Permissions 是按组展开后的权限码集合，均由账号服务随令牌与 /api/auth/me 下发——字段名与签发侧逐字一致
 // （metafusion-auth/internal/store/{token.go,store.go}）。
 // 具体能编辑、能下载什么由本服务按权限码判断，见 permission.go。
 type Principal struct {
 	ID          string   `json:"id"`
 	Username    string   `json:"username"`
-	Role        string   `json:"role"`
 	Groups      []string `json:"groups,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
 	// Scope/ClientID 是第三方 OAuth 授权的绑定标记（与签发侧对齐）：站内会话签发恒清零
-	// 这两项；用途判定见 Verify（只认 token_use，缺用途时才看这两项过渡标记）。
+	// 这两项；用途判定见 Verify（只认 token_use）。
 	// 不进 JSON 输出、不暴露给调用方。
 	Scope    string `json:"-"`
 	ClientID string `json:"-"`
-	// IsThirdParty 标记身份来自第三方 OAuth 授权（仅 token_use=oauth/id_token，或缺用途
-	// 时带 scope/client_id/token_type 过渡标记；token_use=session 永为第一方）。
+	// IsThirdParty 标记身份来自第三方 OAuth 授权（token_use=oauth/id_token）。
 	// 治理类权限默认拒绝此类令牌（见 permission.go 的 Can），不进 JSON 输出。
 	IsThirdParty bool `json:"-"`
-	// PermissionsSet 标记令牌是否显式携带 permissions 声明（含空数组）：携带即以码为准，
-	// 显式空集合不得回落角色；缺字段才是老令牌，走 Can 的历史上传边界兜底。不进 JSON 输出。
-	PermissionsSet bool `json:"-"`
-	// FromPAT 标记身份来自 PAT 内省（而不是签发的 JWT）。它参与授权判定
-	// （见 permission.go：PAT 身份永不回落角色兜底），不进 JSON 输出、不暴露给调用方。
+	// FromPAT 区分 PAT 与 JWT，供审计记录凭据类型，不参与权限判定。
 	FromPAT bool `json:"-"`
-}
-
-// SessionResolver 是存量令牌的兜底：用户可能还持有登录时发的不透明会话令牌（不是 JWT）。
-// 解析**必须问账号服务**（会话表在它那里）；本服务不查任何人的库。
-type SessionResolver interface {
-	Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool)
 }
 
 // authPolicy 是账号服务出站调用的策略，会话兜底与 PAT 内省**共用同一份参数**：
@@ -72,80 +59,6 @@ func authPolicy(name string) upstream.Policy {
 	return p
 }
 
-// SessionClient 是与账号服务约定的兜底解析实现：把原样的 Bearer/Cookie 转给
-// `GET /api/auth/me`，由账号服务验签或查会话表后返回身份。
-// 账号服务是唯一身份来源——目录服务不参与身份判定，因此这里不指向 CATALOG_URL。
-type SessionClient struct {
-	base string
-	up   *upstream.Client
-}
-
-// NewSessionClient 用账号服务基址建兜底解析器；baseURL 为空时它存在但一律判为"无身份"。
-// 单次尝试 1.5s、总预算 4s、两次尝试（见 authPolicy）——账号服务抖一下不再直接等于身份丢失。
-func NewSessionClient(baseURL string) *SessionClient {
-	return &SessionClient{
-		base: strings.TrimRight(baseURL, "/"),
-		up:   upstream.New(authPolicy("auth")),
-	}
-}
-
-// Upstream 暴露出站执行器给深探针：/ready?deep=1 必须复用请求路径上的同一个熔断器。
-func (c *SessionClient) Upstream() *upstream.Client { return c.up }
-
-func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool) {
-	if c.base == "" || (bearer == "" && cookie == "") {
-		return nil, false
-	}
-	header := http.Header{}
-	if bearer != "" {
-		header.Set("Authorization", "Bearer "+bearer)
-	}
-	if cookie != "" {
-		header.Add("Cookie", (&http.Cookie{Name: "mf_session", Value: cookie}).String())
-	}
-	resp, err := c.up.Do(ctx, upstream.Request{
-		Method: http.MethodGet,
-		URL:    c.base + "/api/auth/me",
-		Header: header,
-	})
-	if err != nil {
-		// 兜底失败仍按"无身份"继续（返回 false），这是刻意保留的口径：Verifier.resolve 不能让
-		// 账号服务抖动把普通浏览器的匿名读请求全变成 503。但失败必须留痕，否则线上只表现为
-		// "用户莫名 401"，看不出是依赖故障。
-		if ctx.Err() == nil {
-			slog.Warn("storage: 会话兜底解析失败，按未登录继续", "err", err.Error())
-		}
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	var raw json.RawMessage
-	if err = json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, false
-	}
-	var user struct {
-		ID          string   `json:"id"`
-		Username    string   `json:"username"`
-		Role        string   `json:"role"`
-		Groups      []string `json:"groups,omitempty"`
-		Permissions []string `json:"permissions,omitempty"`
-	}
-	// 组与权限码原样带入：兜底解析与本地验签必须给出同一个 Principal 形状，
-	// 否则"会话令牌能用、访问令牌不能用"这类差异只会在线上暴露。
-	if err = json.Unmarshal(raw, &user); err != nil || user.ID == "" {
-		return nil, false
-	}
-	// 是否出现 permissions 键决定走“以码为准”还是历史上传边界兜底（显式空集合不得回落 admin）。
-	var keys map[string]json.RawMessage
-	_, permissionsSet := map[string]json.RawMessage{}, false
-	if err := json.Unmarshal(raw, &keys); err == nil {
-		_, permissionsSet = keys["permissions"]
-	}
-	return &Principal{ID: user.ID, Username: user.Username, Role: user.Role, Groups: user.Groups, Permissions: user.Permissions, PermissionsSet: permissionsSet}, true
-}
-
 // Verifier 只做一件事：把请求换算成身份。
 // 公钥来源优先取静态配置，其次按 JWKS 地址拉取并缓存（未知 kid 会触发一次强制刷新）。
 type Verifier struct {
@@ -155,8 +68,7 @@ type Verifier struct {
 	static   *rsa.PublicKey
 	// client 只服务 JWKS 拉取，刻意**不**套 upstream 的重试与熔断：公钥拉取自带 10 分钟缓存、
 	// 未知 kid 强刷与"刷新失败回落缓存公钥"的降级顺序，加一层重试/熔断会改变验签的降级路径。
-	client   *http.Client
-	fallback SessionResolver
+	client *http.Client
 	// pat 是个人访问令牌的内省器（见 pat.go）。为 nil（未配置 AUTH_URL）时，
 	// 带 mfp_ 前缀的请求一律 503 auth_unavailable——身份只能问账号服务。
 	pat *PATIntrospector
@@ -173,7 +85,6 @@ type Verifier struct {
 
 type claims struct {
 	Username    string   `json:"preferred_username"`
-	Role        string   `json:"role"`
 	Groups      []string `json:"groups,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
 	// Scope/ClientID/TokenUse 与签发侧对齐（auth Sign 恒写 token_use=session 并清零
@@ -181,37 +92,13 @@ type claims struct {
 	// 用途判定只认 token_use（见 Verify 与 isThirdPartyUse），audience 收口
 	// （Verify 的 WithAudience）已拒掉 aud 指向客户端的令牌，这里再拦“aud 仍是平台
 	// 但带 OAuth 标记”的那一种。
-	Scope     string `json:"scope"`
-	ClientID  string `json:"client_id"`
-	Cid       string `json:"cid"`
-	TokenUse  string `json:"token_use"`
-	TokenType string `json:"token_type"`
-	// permissionsPresent 记录载荷里是否出现 permissions 键（含空数组）：显式空集合
-	// 不得回落角色，只有缺字段的老令牌才走兜底（见 permission.go 的 Can）。
-	permissionsPresent bool
+	Scope    string `json:"scope"`
+	ClientID string `json:"client_id"`
+	TokenUse string `json:"token_use"`
 	jwt.RegisteredClaims
 }
 
-// UnmarshalJSON 在标准 claims 解析之外多记一笔 permissions 键是否存在：
-// encoding/json 无法区分“缺字段”与“显式空数组”（两者都解成 len==0），
-// 而 S01 要求这两者走不同分支（显式空不得回落 admin）。
-func (c *claims) UnmarshalJSON(raw []byte) error {
-	type plain claims
-	var p plain
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return err
-	}
-	*c = claims(p)
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &keys); err != nil {
-		return nil
-	}
-	_, c.permissionsPresent = keys["permissions"]
-	return nil
-}
-
-// 令牌用途取值，与账号服务 store.TokenUse 同源：判定只认这三个值与空串
-// （历史令牌缺键，按会话语义兼容）；未知取值在 Verify 直接拒收。
+// 令牌用途取值，与账号服务 store.TokenUse 同源；未知取值在 Verify 直接拒收。
 const (
 	TokenUseSession = "session"
 	TokenUseOAuth   = "oauth"
@@ -227,7 +114,7 @@ func isThirdPartyUse(use string) bool {
 // 令牌被当成已知用途放行（与签发侧 validTokenUse 同口径）。
 func validTokenUse(use string) bool {
 	switch use {
-	case "", TokenUseSession, TokenUseOAuth, TokenUseIDToken:
+	case TokenUseSession, TokenUseOAuth, TokenUseIDToken:
 		return true
 	default:
 		return false
@@ -253,9 +140,6 @@ func New(cfg config.Config) (*Verifier, error) {
 	}
 	return v, nil
 }
-
-// SetFallback 注入会话兜底解析器（nil 表示只接受 JWT）。
-func (v *Verifier) SetFallback(r SessionResolver) { v.fallback = r }
 
 // SetPAT 注入 PAT 内省器；nil 表示不接 PAT（带 mfp_ 的请求回 503 auth_unavailable）。
 func (v *Verifier) SetPAT(p *PATIntrospector) { v.pat = p }
@@ -313,24 +197,14 @@ func (v *Verifier) Verify(token string) (*Principal, error) {
 		return nil, errors.New("token without subject")
 	}
 	clientID := c.ClientID
-	if clientID == "" {
-		clientID = c.Cid
-	}
 	// 用途隔离（与签发侧及互动 internal/auth/auth.go:325 同一契约）：会话 JWT 恒带
-	// token_use=session，必须按第一方放行；只有 oauth/id_token 才是第三方；缺省（空串）
-	// 是历史令牌，按会话语义兼容。缺省用途下若仍带 scope/client_id/token_type
-	// （签发侧过渡态，会话签发恒清零这几项），视为第三方。未知用途 fail closed
-	// （直接拒收，不按匿名放行）。
+	// token_use=session 按第一方放行；只有 oauth/id_token 是第三方；未知用途直接拒收。
 	use := strings.TrimSpace(c.TokenUse)
 	if !validTokenUse(use) {
 		return nil, errors.New("bad token_use")
 	}
 	thirdParty := isThirdPartyUse(use)
-	if use == "" && !thirdParty {
-		thirdParty = strings.TrimSpace(c.Scope) != "" || strings.TrimSpace(clientID) != "" ||
-			strings.TrimSpace(c.TokenType) != ""
-	}
-	return &Principal{ID: c.Subject, Username: c.Username, Role: c.Role, Groups: c.Groups, Permissions: c.Permissions, Scope: strings.TrimSpace(c.Scope), ClientID: strings.TrimSpace(clientID), IsThirdParty: thirdParty, PermissionsSet: c.permissionsPresent}, nil
+	return &Principal{ID: c.Subject, Username: c.Username, Groups: c.Groups, Permissions: c.Permissions, Scope: strings.TrimSpace(c.Scope), ClientID: strings.TrimSpace(clientID), IsThirdParty: thirdParty}, nil
 }
 
 // publicKey 按 kid 取验签公钥：命中未过期缓存直接返回；TTL 过期或 kid 未知时刷新一次
@@ -545,13 +419,12 @@ func (v *Verifier) resolve(c *gin.Context) (*Principal, patStatus) {
 		}
 		return ident, patOK
 	}
-	if p, err := v.Verify(bearer); err == nil {
-		return p, patOK
+	credential := bearer
+	if credential == "" {
+		credential = cookie
 	}
-	if v.fallback != nil {
-		if p, ok := v.fallback.Resolve(c.Request.Context(), bearer, cookie); ok {
-			return p, patOK
-		}
+	if p, err := v.Verify(credential); err == nil {
+		return p, patOK
 	}
 	return nil, patOK
 }

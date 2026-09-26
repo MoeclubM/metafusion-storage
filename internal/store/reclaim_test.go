@@ -62,14 +62,13 @@ func TestReclaimClaimMutualExclusion(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	stale := now.Add(-ReclaimClaimTimeout)
-	legacy := now.Add(-72 * time.Hour)
 	var wg sync.WaitGroup
 	got := make([]bool, 2)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, ok, err := s.TryClaimReclaim(ctx, a.ID, now, legacy, uuid.NewString(), stale)
+			_, ok, err := s.TryClaimReclaim(ctx, a.ID, now, uuid.NewString(), stale)
 			if err != nil {
 				t.Errorf("claim %d: %v", i, err)
 				return
@@ -92,18 +91,17 @@ func TestReclaimClaimStaleTakeover(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	stale := now.Add(-ReclaimClaimTimeout)
-	legacy := now.Add(-72 * time.Hour)
-	if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, legacy, "holder-1", stale); err != nil || !ok {
+	if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, "holder-1", stale); err != nil || !ok {
 		t.Fatalf("首次认领应成功 ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, legacy, "holder-2", stale); err != nil || ok {
+	if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, "holder-2", stale); err != nil || ok {
 		t.Fatalf("有效认领不可抢占 ok=%v err=%v", ok, err)
 	}
 	db := testutil.Database(t)
 	if _, err := db.ExecContext(ctx, "UPDATE storage.assets SET reclaim_claimed_at = now() - interval '1 hour' WHERE id=$1", a.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
-	if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, legacy, "holder-2", stale); err != nil || !ok {
+	if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, "holder-2", stale); err != nil || !ok {
 		t.Fatalf("超时认领应可接管 ok=%v err=%v", ok, err)
 	}
 }
@@ -141,12 +139,11 @@ func TestDeleteClaimedAssetRevokedByActiveOps(t *testing.T) {
 				t.Fatalf("create: %v", err)
 			}
 			stale := now.Add(-ReclaimClaimTimeout)
-			legacy := now.Add(-72 * time.Hour)
-			if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, legacy, "stale-holder", stale); err != nil || !ok {
+			if _, ok, err := s.TryClaimReclaim(ctx, a.ID, now, "stale-holder", stale); err != nil || !ok {
 				t.Fatalf("认领应成功 ok=%v err=%v", ok, err)
 			}
 			op(t, s, ctx, a)
-			if deleted, err := s.DeleteClaimedAsset(ctx, a.ID, "stale-holder", now, legacy); err != nil || deleted {
+			if deleted, err := s.DeleteClaimedAsset(ctx, a.ID, "stale-holder", now); err != nil || deleted {
 				t.Fatalf("主动操作后旧令牌不得删行 deleted=%v err=%v", deleted, err)
 			}
 			if _, err := s.Asset(ctx, a.ID); err != nil {
@@ -176,7 +173,7 @@ func TestCreatePendingAssetConcurrentQuota(t *testing.T) {
 				ID: uuid.NewString(), SHA256: digest, DeclaredSize: mb,
 				MimeType: "application/octet-stream", FileName: "r.bin",
 				ObjectKey: "objects/" + digest[:2] + "/" + digest + "/r.bin",
-				Status: "pending", UploaderID: uploader, UploadExpiresAt: &lease,
+				Status:    "pending", UploaderID: uploader, UploadExpiresAt: &lease,
 			}, lim)
 		}(i)
 	}
@@ -210,7 +207,7 @@ func TestCheckCompleteCapacityRedeem(t *testing.T) {
 		ID: uuid.NewString(), SHA256: fillerSHA, DeclaredSize: mb - 10,
 		MimeType: "application/octet-stream", FileName: "fill.bin",
 		ObjectKey: "objects/" + fillerSHA[:2] + "/" + fillerSHA + "/fill.bin",
-		Status: "pending", UploaderID: uploader, UploadExpiresAt: &lease,
+		Status:    "pending", UploaderID: uploader, UploadExpiresAt: &lease,
 	}); err != nil {
 		t.Fatalf("filler: %v", err)
 	}

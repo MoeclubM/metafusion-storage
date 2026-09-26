@@ -56,16 +56,15 @@ type CleanupReport struct {
 func RunCleanup(ctx context.Context, db *store.Store, objs *objects.Store, cfg config.Config) (CleanupReport, error) {
 	var rep CleanupReport
 	now := time.Now()
-	legacyCutoff := now.Add(-cfg.PendingTTL())
 	staleBefore := now.Add(-store.ReclaimClaimTimeout)
-	candidates, err := db.ReclaimCandidates(ctx, now, legacyCutoff, staleBefore, cleanupBatch)
+	candidates, err := db.ReclaimCandidates(ctx, now, staleBefore, cleanupBatch)
 	if err != nil {
 		return rep, err
 	}
 	rep.Candidates = len(candidates)
 	for _, a := range candidates {
 		token := uuid.NewString()
-		claimed, ok, cerr := db.TryClaimReclaim(ctx, a.ID, now, legacyCutoff, token, staleBefore)
+		claimed, ok, cerr := db.TryClaimReclaim(ctx, a.ID, now, token, staleBefore)
 		if cerr != nil {
 			rep.ObjectErrors++
 			continue
@@ -103,7 +102,7 @@ func RunCleanup(ctx context.Context, db *store.Store, objs *objects.Store, cfg c
 		}
 		if refs > 1 {
 			// 去重共享：complete 行正复用这份字节，清掉占位行即可，字节是别人的。
-			deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now, legacyCutoff)
+			deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now)
 			if derr != nil {
 				rep.ObjectErrors++
 				release()
@@ -124,7 +123,7 @@ func RunCleanup(ctx context.Context, db *store.Store, objs *objects.Store, cfg c
 			continue
 		}
 		if !exists {
-			deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now, legacyCutoff)
+			deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now)
 			if derr != nil {
 				rep.ObjectErrors++
 				release()
@@ -143,7 +142,7 @@ func RunCleanup(ctx context.Context, db *store.Store, objs *objects.Store, cfg c
 			release()
 			continue
 		}
-		deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now, legacyCutoff)
+		deleted, derr := db.DeleteClaimedAsset(ctx, claimed.ID, token, now)
 		if derr != nil || !deleted {
 			// 字节已删、行还在：行已转活跃（删前瞬间被续租/完成/绑定）或写库失败。
 			// complete 行挂着缺失的键由对账标禁发，pending 行下次按缺失键收尾，可观测、可恢复。
@@ -267,13 +266,9 @@ func scanOrphans(ctx context.Context, db *store.Store, objs *objects.Store, cfg 
 	return nil
 }
 
-// pendingExpired 是回收的过期判定（纯函数）：有租约看租约；NULL 租约的存量行按
-// created_at + 默认 TTL 兜底，与 ReclaimCandidates 的 SQL 条件同语义。
-func pendingExpired(expiresAt *time.Time, createdAt time.Time, now time.Time, ttl time.Duration) bool {
-	if expiresAt != nil {
-		return !expiresAt.After(now)
-	}
-	return !createdAt.Add(ttl).After(now)
+// pendingExpired 与回收 SQL 一致：缺租约的行不可回收。
+func pendingExpired(expiresAt *time.Time, now time.Time) bool {
+	return expiresAt != nil && !expiresAt.After(now)
 }
 
 // keyMatchesSHA 是双向核对的键检查：对象键必须落在声明 sha 的前缀下。

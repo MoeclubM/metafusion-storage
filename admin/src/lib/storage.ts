@@ -1,4 +1,4 @@
-import { apiDelete, apiGet } from "./api";
+import { apiDelete, apiGet, apiPost } from "./api";
 
 // 类型照着服务端 DTO 写（internal/store/store.go 的 Asset / Binding），字段名逐字一致：
 // 少一个字段不会报错，只会让界面空着，所以这里按"服务端有什么就写什么"对齐。
@@ -18,6 +18,9 @@ export type Asset = {
   fail_reason?: string;
   created_at: string;
   completed_at?: string | null;
+  blocked: boolean;
+  blocked_reason?: string;
+  blocked_at?: string | null;
 };
 
 export type Binding = {
@@ -41,11 +44,21 @@ export type EntityFilesResponse = {
   files: FileBinding[] | null;
 };
 
-export type StatsResponse = { assets: number; bytes: number };
+export type StatsResponse = { assets: number; bytes: number; pending: number; blocked: number };
 
-/** GET /api/storage/stats —— 完成态文件数与占用字节；只有 assets 与 bytes 两个字段。 */
+/** GET /api/storage/stats —— 完成态用量、待完成与禁发数。 */
 export function fetchStats(): Promise<StatsResponse> {
   return apiGet<StatsResponse>("/stats");
+}
+
+export type BlockedAssetsResponse = { assets: Asset[]; limit: number; offset: number };
+
+export function fetchBlockedAssets(limit = 100, offset = 0): Promise<BlockedAssetsResponse> {
+  return apiGet<BlockedAssetsResponse>(`/moderation/blocked?limit=${limit}&offset=${offset}`);
+}
+
+export function setAssetBlocked(id: string, blocked: boolean, reason?: string): Promise<{ asset: Asset }> {
+  return apiPost<{ asset: Asset }>(`/assets/${encodeURIComponent(id)}/${blocked ? "block" : "unblock"}`, blocked ? { reason } : undefined);
 }
 
 /** GET /api/storage/assets/:id —— 文件元数据 + 绑定列表（不可读与不存在同为 404）。 */

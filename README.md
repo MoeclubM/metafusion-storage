@@ -11,7 +11,7 @@ MetaFusion 物理资产归档与下载中枢：文件本体、内容寻址、直
 
 存储侧与目录侧的接口只有一条：`GET /api/catalog/entities/{id}`（可见性与 kind）；实体已合并时再取一次
 `/api/catalog/entities/{id}/resolve` 跟随重定向（目录侧把合并事实写进 `catalog.outbox`，**当前没有跨服务消费者**，改引用是引用方自己的事；见主仓库审计文档 §5）。
-身份解析不走目录服务：存量不透明令牌的兜底问 `AUTH_URL`（账号服务）。
+身份解析不走目录服务：会话 JWT 在本地验签，PAT 通过 `AUTH_URL`（账号服务）内省。
 
 跨服务出站调用统一走 `internal/upstream`（超时分层 + 有界重试 + 熔断；执行器按调用点建一次、长期复用，
 连接池与熔断器都在实例里）。参数按调用点收口：
@@ -38,12 +38,13 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | DELETE | `/bindings/{id}` | 绑定创建者/上传者/审核者 | 解绑纠错 |
 | POST | `/assets/{id}/block` | 审核者 | 禁发：只翻禁发位，不删绑定、不改校验状态，误禁可逆 |
 | POST | `/assets/{id}/unblock` | 审核者 | 解禁：原状态即恢复分发资格（仍需满足另两态） |
+| GET | `/moderation/blocked` | 审核者 | 禁发资产清单，支持 `limit`（1–500，默认 100）与 `offset` 分页 |
 | GET | `/assets/{id}` | 可读 | 文件元数据 + 绑定列表 |
 | GET | `/assets/{id}/content` | 可读 | **原样**内联分发对象内容（不转码）：给目录数据里需要长期引用、能被 `<img>` 直接加载的地址用；`download` 在对象存储模式下只回预签名地址（会过期、Host 是对象存储端点），不能当稳定地址 |
 | GET | `/entities/{id}/files` | 实体可见 | 「这个介质/轨道/表达上挂了哪些文件」入口 |
 | GET | `/download/{asset_id}` | 可读 | 对象存储模式返回预签名下载地址；本地模式直接流式下发 |
 | POST | `/verify-hash` | 可读 / 按 asset 校验需登录 | 只给 sha256 = 秒传探测（只认 `hash_verified=true` 的资产）；给 asset_id = 读回对象重算摘要并与声明比对，同样受回读上限约束 |
-| GET | `/stats` | 审核者 | 完成态文件数与占用字节 |
+| GET | `/stats` | 审核者 | 完成态文件数与占用字节、待完成数、禁发数 |
 
 读取可见性的口径只有一条：**上传者本人或审核者直通，其余人只要任一绑定目标实体可见即可读**。
 下载、元数据读取与哈希校验共用这一判定，避免同一份文件在不同接口上出现「能下载不能预览」的差异；
@@ -137,11 +138,11 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | `TRUSTED_PROXIES` | `127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` | 可信反向代理的 IP/CIDR 列表（逗号分隔）：只有对端落在列表里时 gin 才采信 `X-Forwarded-For`，否则 `ClientIP()` 回退 `RemoteAddr`。`none` 表示入口链上没有代理（服务被直接暴露）。非法项**拒绝启动**——静默退回"无可信代理"会让审计行的 `actor_ip` 全是网关容器地址、应用层限流退化成全站共享一个桶，而那种退化在功能上看不出异常 |
 | `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（本服务只使用 `storage` schema） |
 | `STORAGE_ROOT` | `./storage-data` | 本地对象模式根目录与直传暂存目录 |
-| `STORAGE_S3_ENDPOINT` | 空 | 为空即本地对象模式（无需 RustFS）；兼容旧名 `ARCHIVE_S3_ENDPOINT` |
+| `STORAGE_S3_ENDPOINT` | 空 | 为空即本地对象模式（无需 RustFS） |
 | `STORAGE_S3_PUBLIC_ENDPOINT` | 同内部端点 | 客户端直传使用的对外地址。SigV4 覆盖 Host，必须用浏览器可达的地址签发，否则反代后签名校验失败 |
 | `STORAGE_S3_ACCESS_KEY` / `_SECRET_KEY` / `_BUCKET` / `_TLS` | — | 对象存储凭据与桶（旧名 `ARCHIVE_S3_*` 同义） |
 | `STORAGE_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
-| `AUTH_URL` | 空 | 账号服务地址：存量不透明会话令牌的兜底解析（`GET /api/auth/me`）与 PAT 内省（`POST /api/auth/tokens/introspect`）；留空即"只接受 JWT"且 PAT 一律 `503 auth_unavailable` |
+| `AUTH_URL` | 空 | 账号服务地址：PAT 内省（`POST /api/auth/tokens/introspect`）及健康探针；留空时 PAT 一律 `503 auth_unavailable` |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库保持一致，避免存量令牌失效 |
 | `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性判定） |
@@ -150,7 +151,7 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | `STORAGE_MAX_UPLOAD_MB` | `0` | 服务端接收路径的上限，`0` 为不限制（直传路径不受此限） |
 | `STORAGE_VERIFY_MAX_MB` | `0` | complete 阶段回读重算 sha256 的**单对象大小上限**，`0` 为不限制；超限返回 `hash_verify_too_large`，资产留在 pending，不置完成 |
 | `STORAGE_VERIFY_TIMEOUT_SECONDS` | `0` | 同一段回读的墙钟上限（秒），`0` 为不限制；超时返回 `verify_timeout`，同样不置完成 |
-| `STORAGE_PENDING_TTL_HOURS` | `72` | pending 按年龄回收的兜底窗口（小时）：过期未完成、无绑定的 pending 由 worker 回收 |
+| `STORAGE_PENDING_TTL_HOURS` | `72` | 上传租约时长（小时）；过期未完成、无绑定的 pending 由 worker 回收 |
 | `STORAGE_UPLOAD_LEASE_MINUTES` | 跟随预签名有效期 | 单次上传租约（分钟）：`initiate` 落定、续传刷新；`0`/未配置即跟随 `STORAGE_PRESIGN_TTL_MINUTES` |
 | `STORAGE_USER_QUOTA_MB` / `STORAGE_SITE_QUOTA_MB` | `0` | 容量预算（MB）：complete 计真实字节，pending 计声明大小；`0` 为不限制；超限 `initiate` 回 `413 quota_exceeded` |
 | `STORAGE_USER_CONCURRENT_UPLOADS` / `STORAGE_SITE_CONCURRENT_UPLOADS` | `0` | 并发预算（进行中的 pending 数）：`0` 为不限制；超限回 `429 too_many_uploads`；只拦新建占位，不拦续传收尾 |
@@ -233,7 +234,7 @@ go test ./... && go vet ./...
 storage-server worker   # 跑一次就退出：过期上传回收 + 双向对账，由 cron/systemd timer 周期触发
 ```
 
-- **上传回收**：过期（租约到期；存量无租约行按 `created_at + STORAGE_PENDING_TTL_HOURS` 兜底）
+- **上传回收**：按 `upload_expires_at` 租约到期判断；迁移 `000005` 将存量无租约的 pending 行按历史默认 72 小时回填。
   且无绑定的 `pending` 才进候选。处置前重查绑定（候选与删除之间可能有人刚绑上），
   再做双向核对：对象键前缀必须与声明 sha 对上（对不上只上报不动手）；
   仍有其它资产行引用同一键（秒传去重共享）时只删行、不删字节；独占且对象存在才删字节再删行。

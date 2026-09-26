@@ -24,10 +24,11 @@ MetaFusion 存储域自带的管理界面。**独立应用 + 同域路径 + 网�
 | 用量总览 | `/admin/storage/` | `GET /api/storage/stats` | `storage.asset.moderate`（缺码时界面按块降级并说明） |
 | 资产查询 | `/admin/storage/assets` | `GET /api/storage/assets/:id`、`GET /api/storage/assets/:id/content`（内联预览）、`GET /api/storage/download/:assetId` | 读可见性由服务端判定：上传者本人、审核者，或任一绑定目标实体可见 |
 | 绑定解绑 | `/admin/storage/bindings` | `DELETE /api/storage/bindings/:id`、`GET /api/storage/entities/:id/files`、`GET /api/storage/assets/:id` | 解绑限绑定创建者 / 上传者 / 审核者 |
+| 资产审核 | `/admin/storage/moderation` | `GET /api/storage/moderation/blocked`、`POST /api/storage/assets/:id/block`、`POST /api/storage/assets/:id/unblock` | `storage.asset.moderate` |
 
 三处"照实说"的地方（不要改成看起来更漂亮的样子）：
 
-1. **不画占用率**：`/stats` 只返回 `assets` 与 `bytes`，**没有配额字段**，进度条的分母只能靠编。
+1. **不画占用率**：`/stats` 返回 `assets`、`bytes`、`pending`、`blocked`，但没有配额上限。
    页面写明统计口径是 `status='complete'` 的资产，并给出原始字节数。
 2. **404 有两种含义**：资产查询对"不存在"与"当前账号不可读"一律回 404（`internal/handler/files.go` 的
    `readable`），界面不假装能区分，两句话都写出来。

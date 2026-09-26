@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,6 +81,31 @@ func (h *Handler) blockAsset(c *gin.Context) {
 // unblockAsset 解禁：复位禁发位，原 status 即恢复分发资格（仍需满足 readable 的另两态）。
 func (h *Handler) unblockAsset(c *gin.Context) {
 	h.setBlocked(c, false)
+}
+
+// listBlockedAssets 只向存储审核者提供禁发清单；普通上传者不能据此枚举资产。
+func (h *Handler) listBlockedAssets(c *gin.Context) {
+	p := auth.Current(c)
+	if p == nil || !p.Can(auth.PermissionAssetModerate) {
+		fail(c, http.StatusForbidden, "forbidden")
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	if err != nil || limit < 1 || limit > 500 {
+		fail(c, http.StatusBadRequest, "invalid_payload")
+		return
+	}
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil || offset < 0 {
+		fail(c, http.StatusBadRequest, "invalid_payload")
+		return
+	}
+	assets, err := h.db.ListBlocked(c.Request.Context(), limit, offset)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, "module_error")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"assets": assets, "limit": limit, "offset": offset})
 }
 
 func (h *Handler) setBlocked(c *gin.Context, block bool) {

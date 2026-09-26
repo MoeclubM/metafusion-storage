@@ -130,17 +130,16 @@ func patHash(token string) string {
 type patIdentity struct {
 	UserID      string
 	Username    string
-	Role        string
 	Permissions []string
 	// ExpiresAt 是令牌自身的过期时刻；零值表示永不过期。
 	ExpiresAt time.Time
 }
 
 // principal 按与 JWT 相同的形状产出身份：下游一律走 Principal.Can，不需要为 PAT 另写权限逻辑。
-// FromPAT 是给 Can 的护栏：PAT 的权限就是内省返回的那一列（可能为空），永不回落到角色兜底。
+// PAT 的权限只来自内省返回的权限码。
 func (p patIdentity) principal() *Principal {
 	return &Principal{
-		ID: p.UserID, Username: p.Username, Role: p.Role,
+		ID: p.UserID, Username: p.Username,
 		Permissions: p.Permissions, FromPAT: true,
 	}
 }
@@ -210,7 +209,6 @@ type patIntrospectResponse struct {
 	Valid       bool          `json:"valid"`
 	UserID      string        `json:"user_id"`
 	Username    string        `json:"username"`
-	Role        string        `json:"role"`
 	Permissions []string      `json:"permissions"`
 	ExpiresAt   *patTimestamp `json:"expires_at"`
 }
@@ -292,7 +290,6 @@ func (p *PATIntrospector) fetch(ctx context.Context, token string) (patCacheEntr
 	ident := &patIdentity{
 		UserID:      doc.UserID,
 		Username:    doc.Username,
-		Role:        doc.Role,
 		Permissions: doc.Permissions,
 	}
 	if doc.ExpiresAt != nil {

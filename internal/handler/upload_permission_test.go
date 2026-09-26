@@ -74,7 +74,6 @@ func TestUploadRequiresUploadPermission(t *testing.T) {
 		role  string
 		perms []string
 	}{
-		{"老令牌按历史上传边界兼容（无权限码）", "editor", nil},
 		{"member 组默认持有的上传码", "user", []string{"community.post.create", auth.PermissionAssetUpload}},
 		{"* 通配（admin 组）", "admin", []string{"*"}},
 	}

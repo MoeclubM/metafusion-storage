@@ -3,16 +3,20 @@
 // 服务端把"不存在"与"不可读"都折叠成 404 not_found，界面必须照实说明这一点，
 // 否则运维会以为是自己拼错了 id。
 import React, { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Badge, Button, Card, CopyField, DataList, EmptyState, Icon, Notice, SectionHeader, Spinner, TextInput, useMessage } from "@/components/ui";
 import { BindingTable } from "@/components/BindingTable";
 import { ApiError, describeApiError, normalizeIdInput, type Message } from "@/lib/api";
 import { formatBytes, formatDateTime, isUuid } from "@/lib/format";
 import { assetContentUrl, assetDownloadUrl, fetchAsset, previewKind, type AssetResponse } from "@/lib/storage";
 import { useI18n } from "@/shared/i18n/I18nProvider";
+import { useSession } from "@/components/SessionProvider";
+import { PERMISSION_ASSET_MODERATE } from "@/lib/session";
 
 export default function AssetsPage() {
   const { t, locale } = useI18n();
   const text = useMessage();
+  const { can } = useSession();
   const [value, setValue] = useState("");
   const [data, setData] = useState<AssetResponse | null>(null);
   const [error, setError] = useState<Message | null>(null);
@@ -112,6 +116,9 @@ export default function AssetsPage() {
               items={[
                 { label: t("assets.field.id"), value: asset.id, mono: true },
                 { label: t("assets.field.status"), value: <StatusBadge status={asset.status} /> },
+                { label: t("assets.field.blocked"), value: <Badge tone={asset.blocked ? "bad" : "ok"}>{t(asset.blocked ? "assets.blocked.yes" : "assets.blocked.no")}</Badge> },
+                asset.blocked_reason ? { label: t("assets.field.blockedReason"), value: asset.blocked_reason } : null,
+                asset.blocked_at ? { label: t("assets.field.blockedAt"), value: formatDateTime(asset.blocked_at, locale) } : null,
                 {
                   label: t("assets.field.hashVerified"),
                   value: (
@@ -142,6 +149,7 @@ export default function AssetsPage() {
                   : null,
               ].filter(Boolean) as { label: string; value: React.ReactNode; mono?: boolean }[]}
             />
+            {can(PERMISSION_ASSET_MODERATE) ? <Link href="/moderation" className="mt-4 inline-flex text-xs text-primary hover:underline">{t("nav.moderation")}</Link> : null}
             <div className="mt-4 space-y-2">
               <div>
                 <div className="mb-1 text-[11px] uppercase tracking-wide text-text-faint">{t("assets.field.sha256")}</div>

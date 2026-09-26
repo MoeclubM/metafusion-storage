@@ -1,94 +1,62 @@
 "use client";
 // 应用外壳：顶部（应用标识 + 当前身份 + 语言切换）、左侧导航、内容区。
 // 与主站同域同路径前缀，因此语言与主题沿用同一套 cookie / localStorage 口径。
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Badge, Icon } from "@/components/ui";
+import { Icon } from "@/components/ui";
 import { useSession } from "@/components/SessionProvider";
 import { useI18n } from "@/shared/i18n/I18nProvider";
 import { BASE_PATH } from "@/lib/app";
+import { PERMISSION_ASSET_MODERATE } from "@/lib/session";
 import { locales } from "@/shared/i18n/routing";
+import { ThemeModeSwitcher } from "./ThemeModeSwitcher";
 
 const NAV = [
   { href: "/", key: "nav.overview", icon: "gauge" },
   { href: "/assets", key: "nav.assets", icon: "search" },
   { href: "/bindings", key: "nav.bindings", icon: "unlink" },
+  { href: "/moderation", key: "nav.moderation", icon: "shield" },
 ];
 
-export function AppShell({ subtitle, children }: { subtitle: string; children: React.ReactNode }) {
-  const { t, locale, setLocale } = useI18n();
-  const { state } = useSession();
+export function AppShell({ children }: { children: React.ReactNode }) {
+  const { t } = useI18n();
+  const { state, can } = useSession();
   const pathname = usePathname();
   const router = useRouter();
 
   // usePathname 返回的是带 basePath 的完整路径，去掉前缀后才能与上面的 href 比。
   const rest = pathname.startsWith(BASE_PATH) ? pathname.slice(BASE_PATH.length) || "/" : pathname;
   const current = rest.replace(/\/+$/, "") || "/";
+  const visibleNav = NAV.filter((item) => item.href !== "/moderation" || can(PERMISSION_ASSET_MODERATE));
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-30 border-b border-line bg-surface/70 backdrop-blur">
-        <div className="mx-auto flex max-w-page flex-wrap items-center gap-3 px-4 py-3">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span className="grid h-8 w-8 place-items-center rounded-control border border-line bg-surfaceSubtle text-primary">
-              <Icon name="file" className="w-4 h-4" />
-            </span>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-text-strong">{t("common.appName")}</div>
-              <div className="truncate text-[11px] text-text-muted">{subtitle}</div>
-            </div>
+      <header className="sticky top-0 z-30 border-b border-line bg-surface/90 backdrop-blur">
+        <div className="mx-auto flex h-14 w-full max-w-page items-center justify-between gap-3 px-4 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <a href="/admin" className="inline-flex shrink-0 items-center gap-1 text-xs text-text-muted hover:text-text-strong"><span aria-hidden="true">←</span>{t("nav.backToHub")}</a>
+            <span className="text-text-faint">/</span>
+            <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-text-strong"><Icon name="shield" className="h-4 w-4 shrink-0 text-primary" /><span className="truncate">{t("common.appName")}</span></div>
           </div>
-
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            {state.status === "ready" ? (
-              <>
-                <span className="hidden text-[11px] text-text-muted sm:inline">
-                  {t("session.signedInAs", { name: state.user.username })}
-                </span>
-                <span title={t("session.role", { role: state.user.role })}>
-                  <Badge tone="neutral">{state.user.role}</Badge>
-                </span>
-                <span className="hidden text-[11px] text-text-faint md:inline">
-                  {t("session.groups", {
-                    groups: (state.user.groups ?? []).join(", ") || t("session.noGroups"),
-                  })}
-                </span>
-              </>
-            ) : null}
-            <a href="/admin" className="rounded-control border border-line px-3 py-2 text-xs text-text-body hover:bg-surfaceHover">
-              {t("nav.backToHub")}
-            </a>
-            <label className="flex items-center gap-2 text-xs text-text-muted">
-              <span className="sr-only sm:not-sr-only">{t("common.language")}</span>
-              <select value={locale} onChange={(e) => setLocale(e.target.value as typeof locale)} className="rounded-control border border-line bg-surface px-2 py-2 text-xs text-text-strong">
-                {locales.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
-              </select>
-            </label>
+          <div className="flex shrink-0 items-center gap-2">
+            <LocaleMenu />
+            <ThemeModeSwitcher />
+            {state.status === "ready" ? <span className="hidden max-w-[9rem] truncate rounded border border-primary/30 bg-primary/20 px-2 py-0.5 font-mono text-xs text-primary sm:inline-flex" title={state.user.username}>{state.user.username}</span> : null}
           </div>
         </div>
       </header>
-
-      {/* 老令牌（或没配权限组的实例）不带 permissions 声明：这时界面与服务端都用历史角色兜底，
-          不说清楚的话，用户会以为权限组没生效。 */}
-      {state.status === "ready" && (state.user.permissions ?? []).length === 0 ? (
-        <div className="border-b border-amber-500/30 bg-amber-500/5">
-          <p className="mx-auto max-w-page px-4 py-2 text-[11px] leading-relaxed text-amber-400">
-            {t("session.legacyFallback")}
-          </p>
-        </div>
-      ) : null}
 
       <div className="mx-auto flex max-w-page flex-col gap-6 px-4 py-6 lg:flex-row">
         <nav className="shrink-0 lg:w-52" aria-label={t("nav.groupLabel")}>
           <div className="rounded-control border border-line bg-surfaceSubtle p-3 lg:hidden">
             <label htmlFor="storage-admin-section" className="mb-2 block text-xs font-medium text-text-muted">{t("nav.groupLabel")}</label>
             <select id="storage-admin-section" value={current} onChange={(e) => router.push(e.target.value)} className="w-full rounded-control border border-line bg-surface px-3 py-2.5 text-sm text-text-strong">
-              {NAV.map((item) => <option key={item.href} value={item.href}>{t(item.key)}</option>)}
+              {visibleNav.map((item) => <option key={item.href} value={item.href}>{t(item.key)}</option>)}
             </select>
           </div>
           <ul className="hidden rounded-control border border-line bg-surfaceSubtle p-2 lg:sticky lg:top-24 lg:flex lg:flex-col">
-            {NAV.map((item) => {
+            {visibleNav.map((item) => {
               const active = current === item.href;
               return (
                 <li key={item.href} className="shrink-0">
@@ -115,4 +83,26 @@ export function AppShell({ subtitle, children }: { subtitle: string; children: R
       </div>
     </div>
   );
+}
+
+const LOCALE_NAMES: Record<string, string> = { "zh-CN": "简体中文", "en-US": "English", "zh-TW": "繁體中文", "ja-JP": "日本語" };
+
+function LocaleMenu() {
+  const { t, locale, setLocale } = useI18n();
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => { if (!container.current?.contains(event.target as Node)) setOpen(false); };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onPointer); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return <div className="relative" ref={container}>
+    <button type="button" aria-label={t("common.language")} title={t("common.language")} aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(!open)} className="grid h-9 w-9 place-items-center rounded-full border border-line bg-surfaceSubtle text-text-body hover:bg-surfaceHover"><span aria-hidden="true">文</span></button>
+    {open ? <div role="menu" aria-label={t("common.language")} className="absolute right-0 z-50 mt-2 w-44 rounded-card border border-line bg-surface p-1.5 shadow-elevated">
+      {locales.map((loc) => <button key={loc} type="button" role="menuitemradio" aria-checked={locale === loc} onClick={() => { setLocale(loc); setOpen(false); }} className={"flex w-full items-center justify-between rounded-control px-3 py-2 text-left text-xs hover:bg-surfaceHover " + (locale === loc ? "font-semibold text-primary" : "text-text-body")}>{LOCALE_NAMES[loc] ?? loc}{locale === loc ? "✓" : null}</button>)}
+    </div> : null}
+  </div>;
 }

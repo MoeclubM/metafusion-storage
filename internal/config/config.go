@@ -9,8 +9,7 @@ import (
 )
 
 // Config 是存储服务的运行配置，全部来自环境变量；缺失时回落到可用的开发默认值。
-// S3/归档相关变量沿用主仓库 deploy/docker-compose.yml 的 ARCHIVE_* 命名，
-// 拆分期两侧可以共用同一份 .env，不需要两套变量名。
+// 对象存储只读取 STORAGE_* 配置。
 type Config struct {
 	Port string
 	// TrustedProxies 是可信反向代理的 IP/CIDR 列表（TRUSTED_PROXIES，逗号分隔）。
@@ -37,8 +36,7 @@ type Config struct {
 	JWTPublicKeyPEM string
 	JWTIssuer       string
 	JWTAudience     string
-	// AuthURL 账号服务地址，仅用于存量不透明会话令牌的兜底解析（GET /api/auth/me）。
-	// 留空即"只接受 JWT"：身份问题只问账号服务，不查任何人的库。
+	// AuthURL 账号服务地址，用于 PAT 内省及健康探针。会话 JWT 在本地验签。
 	AuthURL string
 	// CatalogURL 元数据服务地址：实体可见性必须问它，存储侧不复制目录数据。
 	CatalogURL string
@@ -56,9 +54,8 @@ type Config struct {
 	// VerifyTimeout 是同一段回读的墙钟上限：读不完即失败（verify_timeout），同样不跳过校验。
 	// 0 表示不限制，与"刻意不设 ReadTimeout/WriteTimeout"的大文件取向一致。
 	VerifyTimeout time.Duration
-	// PendingTTLHours 是 pending 按年龄回收的兜底窗口：超过它且租约过期、无绑定的
-	// pending 由后台清理任务回收（storage-server worker）。存量 NULL 租约的行按
-	// created_at + 该值判定，迁移不回填策略值。
+	// PendingTTLHours 为清理策略配置，存量空租约由 000005 迁移按 72 小时回填；
+	// 回收判断只依据资产行上的 upload_expires_at。
 	PendingTTLHours int
 	// UploadLeaseMinutes 是单次上传租约（分钟）：initiate 落定到期时间，续传刷新。
 	// 0 表示跟随 PresignTTL——直传地址过期了租约也没意义，两者默认同寿命。
@@ -85,13 +82,13 @@ func Load() Config {
 		Port:                  env("PORT", "8082"),
 		TrustedProxies:        env("TRUSTED_PROXIES", ""),
 		DatabaseURL:           env("DATABASE_URL", ""),
-		Root:                  env("STORAGE_ROOT", env("ARCHIVE_PATH", "./storage-data")),
-		S3Endpoint:            env("STORAGE_S3_ENDPOINT", env("ARCHIVE_S3_ENDPOINT", "")),
-		S3PublicEndpoint:      env("STORAGE_S3_PUBLIC_ENDPOINT", env("ARCHIVE_S3_PUBLIC_ENDPOINT", "")),
-		S3AccessKey:           env("STORAGE_S3_ACCESS_KEY", env("ARCHIVE_S3_ACCESS_KEY", "")),
-		S3SecretKey:           env("STORAGE_S3_SECRET_KEY", env("ARCHIVE_S3_SECRET_KEY", "")),
-		S3Bucket:              env("STORAGE_S3_BUCKET", env("ARCHIVE_S3_BUCKET", "metafusion-master")),
-		S3TLS:                 envBool("STORAGE_S3_TLS", env("ARCHIVE_S3_TLS", "true") != "false"),
+		Root:                  env("STORAGE_ROOT", "./storage-data"),
+		S3Endpoint:            env("STORAGE_S3_ENDPOINT", ""),
+		S3PublicEndpoint:      env("STORAGE_S3_PUBLIC_ENDPOINT", ""),
+		S3AccessKey:           env("STORAGE_S3_ACCESS_KEY", ""),
+		S3SecretKey:           env("STORAGE_S3_SECRET_KEY", ""),
+		S3Bucket:              env("STORAGE_S3_BUCKET", "metafusion-master"),
+		S3TLS:                 envBool("STORAGE_S3_TLS", true),
 		JWKSURL:               env("STORAGE_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
 		JWTPublicKeyPEM:       env("AUTH_JWT_PUBLIC_KEY", ""),
 		JWTIssuer:             env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
@@ -110,7 +107,7 @@ func Load() Config {
 		UserConcurrentUploads: envInt("STORAGE_USER_CONCURRENT_UPLOADS", 0),
 		SiteConcurrentUploads: envInt("STORAGE_SITE_CONCURRENT_UPLOADS", 0),
 		OrphanRetentionDays:   envInt("STORAGE_ORPHAN_RETENTION_DAYS", 7),
-		S3SkipBucketEnsure:    envBool("STORAGE_S3_SKIP_BUCKET_ENSURE", env("ARCHIVE_S3_SKIP_BUCKET_ENSURE", "false") == "true"),
+		S3SkipBucketEnsure:    envBool("STORAGE_S3_SKIP_BUCKET_ENSURE", false),
 	}
 	if c.UploadLeaseMinutes <= 0 {
 		c.UploadLeaseMinutes = int(c.PresignTTL.Minutes())
@@ -153,7 +150,7 @@ func (c Config) UploadLease() time.Duration {
 	return time.Duration(c.UploadLeaseMinutes) * time.Minute
 }
 
-// PendingTTL 是 pending 按年龄回收的兜底窗口。
+// PendingTTL 是历史策略窗口的配置值；回收判断使用资产行上的明确租约。
 func (c Config) PendingTTL() time.Duration {
 	if c.PendingTTLHours <= 0 {
 		return 72 * time.Hour

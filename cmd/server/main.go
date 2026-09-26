@@ -122,16 +122,12 @@ func main() {
 		log.Fatalf("token verifier initialization failed: %v", err)
 	}
 	// 跨服务出站都走 upstream 执行器（超时分层 + 有界重试 + 熔断，见 internal/upstream）：
-	// 目录可见性、会话兜底、PAT 内省各建一个、长期复用——连接池与熔断器都在实例里，
+	// 目录可见性、PAT 内省各建一个、长期复用——连接池与熔断器都在实例里，
 	// 每次请求新建等于每请求一个熔断器（永远闭合，等于没熔断）。
-	// 未配置 AUTH_URL 时这两个客户端仍存在但不会被注入，深探针据此记 not_configured。
-	sessionClient := auth.NewSessionClient(cfg.AuthURL)
+	// 未配置 AUTH_URL 时内省器仍存在但不会被注入，深探针据此记 not_configured。
 	patIntrospector := auth.NewPATIntrospector(cfg.AuthURL)
 	if cfg.AuthURL != "" {
-		// 存量兜底：浏览器可能还持有登录时的不透明会话令牌（非 JWT）。身份只能问账号服务，
-		// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
-		verifier.SetFallback(sessionClient)
-		// PAT（mfp_ 前缀）与会话兜底共用同一个账号服务地址：带 mfp_ 的请求走内省端点
+		// PAT（mfp_ 前缀）走内省端点
 		// POST /api/auth/tokens/introspect，结果进程内缓存 60 秒（= 吊销窗口），见 internal/auth/pat.go。
 		verifier.SetPAT(patIntrospector)
 	} else {
@@ -140,7 +136,7 @@ func main() {
 	// 启动时把实际生效的出站参数打出来：调用点只写自己关心的字段，其余由策略兜底收敛，
 	// 排查"为什么这次调用退避了 5 次"时不该靠读代码。
 	catPolicy := cat.Upstream().Policy()
-	authOutPolicy := sessionClient.Upstream().Policy()
+	authOutPolicy := patIntrospector.Upstream().Policy()
 	log.Printf("upstream policies: catalog(attempts=%d attempt=%s budget=%s breaker=%d/%s) auth(attempts=%d attempt=%s budget=%s breaker=%d/%s)",
 		catPolicy.Attempts, catPolicy.AttemptTimeout, catPolicy.Budget, catPolicy.BreakerThreshold, catPolicy.BreakerOpenFor,
 		authOutPolicy.Attempts, authOutPolicy.AttemptTimeout, authOutPolicy.Budget,
@@ -148,7 +144,7 @@ func main() {
 	// 深探针目标：地址来自配置（未配置即 not_configured），执行器与请求路径共用。
 	upstreamProbes := []upstream.ProbeTarget{
 		{Client: cat.Upstream(), URL: upstreamReadyURL(cfg.CatalogURL)},
-		{Client: sessionClient.Upstream(), URL: upstreamReadyURL(cfg.AuthURL)},
+		{Client: patIntrospector.Upstream(), URL: upstreamReadyURL(cfg.AuthURL)},
 	}
 
 	r := gin.New()

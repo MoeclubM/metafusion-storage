@@ -28,24 +28,24 @@ func TestNormalizeRole(t *testing.T) {
 }
 
 // 只有上传者本人或持 storage.asset.moderate 的审核者可以完成/绑定/解绑文件。
-// S01 起老令牌不再凭 admin 角色管理他人文件（审核码无角色兜底），仅保留历史上传边界。
+// 权限码缺失时不能管理他人文件或上传。
 func TestCanManageAsset(t *testing.T) {
-	owner := &auth.Principal{ID: "u1", Role: "user"}
-	moderator := &auth.Principal{ID: "u2", Role: "user", Permissions: []string{"storage.asset.moderate"}}
-	legacyAdmin := &auth.Principal{ID: "u3", Role: "admin"}
-	revokedAdmin := &auth.Principal{ID: "u4", Role: "admin", Permissions: []string{"community.post.create"}}
-	other := &auth.Principal{ID: "u5", Role: "editor"}
+	owner := &auth.Principal{ID: "u1"}
+	moderator := &auth.Principal{ID: "u2", Permissions: []string{"storage.asset.moderate"}}
+	withoutPermissions := &auth.Principal{ID: "u3"}
+	revokedAdmin := &auth.Principal{ID: "u4", Permissions: []string{"community.post.create"}}
+	other := &auth.Principal{ID: "u5"}
 	if !canManageAsset(owner, "u1") {
 		t.Fatal("上传者应可管理自己的文件")
 	}
 	if !canManageAsset(moderator, "u1") {
 		t.Fatal("持 storage.asset.moderate 的成员应可管理他人文件")
 	}
-	if canManageAsset(legacyAdmin, "u1") {
-		t.Fatal("S01 起老令牌的 admin 也不得凭角色管理他人文件")
+	if canManageAsset(withoutPermissions, "u1") {
+		t.Fatal("无权限码不能管理他人文件")
 	}
-	if !legacyAdmin.Can(auth.PermissionAssetUpload) {
-		t.Fatal("老令牌仍保留历史上传边界")
+	if withoutPermissions.Can(auth.PermissionAssetUpload) {
+		t.Fatal("无权限码不能上传")
 	}
 	if canManageAsset(revokedAdmin, "u1") {
 		t.Fatal("后台收回权限组后，admin 角色不得再管理他人文件")

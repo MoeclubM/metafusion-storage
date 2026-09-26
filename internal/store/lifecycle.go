@@ -40,18 +40,15 @@ func (s *Store) SetUploadExpiry(ctx context.Context, id string, expiresAt time.T
 	return err
 }
 
-// ReclaimCandidates 列出可回收的过期 pending：无绑定（被绑定的资产是编目事实 ary，
-// 清理绝不动）、非禁发、租约已过期、无有效认领持有。存量 NULL 租约按 created_at +
-// 默认 TTL 兜底（legacyCutoff 由调用方按配置算好传进来，SQL 里不写策略值）。
+// ReclaimCandidates 列出可回收的过期 pending：无绑定、非禁发、租约已过期、无有效认领持有。
 // 只做候选列举：逐行处置前必须经 TryClaimReclaim 原子认领，认领失败即他人已接管或行已转活跃。
-func (s *Store) ReclaimCandidates(ctx context.Context, now time.Time, legacyCutoff time.Time, staleBefore time.Time, limit int) ([]Asset, error) {
+func (s *Store) ReclaimCandidates(ctx context.Context, now time.Time, staleBefore time.Time, limit int) ([]Asset, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT "+assetCols+" FROM storage.assets a"+
 		" WHERE a.status='pending' AND NOT a.blocked"+
 		" AND NOT EXISTS (SELECT 1 FROM storage.bindings b WHERE b.asset_id=a.id)"+
-		" AND ((a.upload_expires_at IS NOT NULL AND a.upload_expires_at <= $1)"+
-		" OR (a.upload_expires_at IS NULL AND a.created_at <= $2))"+
-		" AND (a.reclaim_token='' OR a.reclaim_claimed_at IS NULL OR a.reclaim_claimed_at <= $3)"+
-		" ORDER BY a.created_at ASC LIMIT $4", now, legacyCutoff, staleBefore, limit)
+		" AND a.upload_expires_at <= $1"+
+		" AND (a.reclaim_token='' OR a.reclaim_claimed_at IS NULL OR a.reclaim_claimed_at <= $2)"+
+		" ORDER BY a.created_at ASC LIMIT $3", now, staleBefore, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -104,12 +101,15 @@ func (s *Store) ClearBlocked(ctx context.Context, id string) error {
 	return err
 }
 
-// ListBlocked 按禁发时间倒序列出被禁发资产，供运营盘点（limit 上限 500，与实体文件列表同口径）。
-func (s *Store) ListBlocked(ctx context.Context, limit int) ([]Asset, error) {
+// ListBlocked 按禁发时间倒序列出被禁发资产，供运营分页盘点。
+func (s *Store) ListBlocked(ctx context.Context, limit, offset int) ([]Asset, error) {
 	if limit <= 0 || limit > 500 {
-		limit = 500
+		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+assetCols+" FROM storage.assets WHERE blocked ORDER BY blocked_at DESC LIMIT $1", limit)
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT "+assetCols+" FROM storage.assets WHERE blocked ORDER BY blocked_at DESC, id DESC LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
 		return nil, err
 	}

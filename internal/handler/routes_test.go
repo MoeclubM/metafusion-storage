@@ -21,6 +21,7 @@ var frozenRoutes = []string{
 	"GET /api/storage/assets/:id/content",
 	"GET /api/storage/download/:assetId",
 	"GET /api/storage/entities/:id/files",
+	"GET /api/storage/moderation/blocked",
 	"GET /api/storage/stats",
 	"POST /api/storage/assets/:id/block",
 	"POST /api/storage/assets/:id/unblock",

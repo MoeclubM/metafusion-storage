@@ -128,8 +128,7 @@ func TestPATIntrospectOutcomes(t *testing.T) {
 	throttled := patToken('h')
 	down := patToken('f')
 	f, srv := newFakeAuth(t, map[string]fakeAuthDoc{
-		valid: {Valid: true, UserID: "u-pat", Username: "kana", Role: "editor",
-			Permissions: []string{"community.post.create"}, ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		valid: {Valid: true, UserID: "u-pat", Username: "kana", Permissions: []string{"community.post.create"}, ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
 	})
 	p := NewPATIntrospector(srv.URL)
 	ctx := context.Background()
@@ -138,7 +137,7 @@ func TestPATIntrospectOutcomes(t *testing.T) {
 	if err != nil || ident == nil {
 		t.Fatalf("有效 PAT 应返回身份: ident=%v err=%v", ident, err)
 	}
-	if ident.UserID != "u-pat" || ident.Role != "editor" || len(ident.Permissions) != 1 || ident.ExpiresAt.IsZero() {
+	if ident.UserID != "u-pat" || len(ident.Permissions) != 1 || ident.ExpiresAt.IsZero() {
 		t.Fatalf("身份字段不符: %+v", ident)
 	}
 
@@ -281,10 +280,9 @@ func TestPATCacheEvictsExpiredFirst(t *testing.T) {
 	}
 }
 
-// 手工构造的空权限 PAT（role 仍是 admin）必须一无所获：这是"永不按角色兜底"的直接证明，
-// 即便创建端点已经禁止空 scopes，也要防将来回退。
-func TestPATPrincipalNeverFallsBackToRole(t *testing.T) {
-	pat := &Principal{ID: "u-1", Role: "admin", FromPAT: true}
+// 手工构造的空权限 PAT 必须一无所获。
+func TestPATPrincipalDeniesEmptyPermissions(t *testing.T) {
+	pat := &Principal{ID: "u-1", FromPAT: true}
 	for _, code := range []string{permissionWildcard, PermissionAssetUpload, PermissionAssetModerate} {
 		if pat.Can(code) {
 			t.Fatalf("空权限的 PAT 不该持有 %s", code)
@@ -293,23 +291,22 @@ func TestPATPrincipalNeverFallsBackToRole(t *testing.T) {
 			t.Fatalf("HasPermission 对空权限的 PAT 不该放行 %s", code)
 		}
 	}
-	// 对照：同角色的**老令牌**（缺 permissions 键、不是 PAT）仅保留历史上传边界——
-	// S01 起审核码不再设 admin 兜底，这条差异是有意的，不能顺手把老令牌的上传也收紧。
-	legacy := &Principal{ID: "u-2", Role: "admin"}
-	if !legacy.Can(PermissionAssetUpload) {
-		t.Fatal("老令牌的历史上传边界必须保持")
+	// JWT 与 PAT 使用同一套权限码判断。
+	withoutPermissions := &Principal{ID: "u-2"}
+	if withoutPermissions.Can(PermissionAssetUpload) {
+		t.Fatal("空权限身份不得上传")
 	}
-	if legacy.Can(PermissionAssetModerate) {
-		t.Fatal("S01 起老令牌的 admin 也不得放行审核码")
+	if withoutPermissions.Can(PermissionAssetModerate) {
+		t.Fatal("空权限身份不得审核")
 	}
-	if legacy.HasPermission(PermissionAssetModerate) {
-		t.Fatal("HasPermission 不对任何角色兜底：老令牌也不该在空 permissions 上放行")
+	if withoutPermissions.HasPermission(PermissionAssetModerate) {
+		t.Fatal("HasPermission 对空权限不得放行")
 	}
-	// 权限码非空时两者必须完全等价（Can 只是多了老令牌兜底那一段）。
+	// 权限码非空时两者必须完全等价。
 	for _, p := range []*Principal{
-		{ID: "u-3", Role: "user", Permissions: []string{PermissionAssetUpload}},
-		{ID: "u-4", Role: "user", Permissions: []string{permissionWildcard}},
-		{ID: "u-5", Role: "admin", Permissions: []string{PermissionAssetUpload}, FromPAT: true},
+		{ID: "u-3", Permissions: []string{PermissionAssetUpload}},
+		{ID: "u-4", Permissions: []string{permissionWildcard}},
+		{ID: "u-5", Permissions: []string{PermissionAssetUpload}, FromPAT: true},
 	} {
 		for _, code := range []string{PermissionAssetUpload, PermissionAssetModerate} {
 			if p.Can(code) != p.HasPermission(code) {

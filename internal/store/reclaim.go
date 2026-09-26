@@ -24,27 +24,26 @@ var ErrTooManyUploads = errors.New("too_many_uploads")
 
 // QuotaLimits 是配额预留的输入：零值表示该档不限制（与 quotasEnabled 关断语义一致）。
 type QuotaLimits struct {
-	UserQuotaBytes      int64
-	SiteQuotaBytes      int64
-	UserConcurrent      int
-	SiteConcurrent      int
+	UserQuotaBytes int64
+	SiteQuotaBytes int64
+	UserConcurrent int
+	SiteConcurrent int
 }
 
 // TryClaimReclaim 按“pending + 未禁发 + 租约已过期 + 无绑定 + 无有效认领”原子认领一行。
 // 单条 UPDATE … RETURNING：认领本身就是门禁，成功才返回 claimed=true 与持有令牌的行。
 // 远程对象操作一律在认领之外做，终删凭令牌（见 DeleteClaimedAsset），不持长事务。
-func (s *Store) TryClaimReclaim(ctx context.Context, id string, now time.Time, legacyCutoff time.Time, token string, staleBefore time.Time) (Asset, bool, error) {
+func (s *Store) TryClaimReclaim(ctx context.Context, id string, now time.Time, token string, staleBefore time.Time) (Asset, bool, error) {
 	if token == "" {
 		return Asset{}, false, errors.New("reclaim token required")
 	}
 	a, err := scanAsset(s.db.QueryRowContext(ctx, "UPDATE storage.assets AS a SET reclaim_token=$2, reclaim_claimed_at=$3"+
 		" WHERE a.id=$1"+
 		" AND a.status='pending' AND NOT a.blocked"+
-		" AND ((a.upload_expires_at IS NOT NULL AND a.upload_expires_at <= $4)"+
-		" OR (a.upload_expires_at IS NULL AND a.created_at <= $5))"+
+		" AND a.upload_expires_at <= $4"+
 		" AND NOT EXISTS (SELECT 1 FROM storage.bindings b WHERE b.asset_id=a.id)"+
-		" AND (a.reclaim_token='' OR a.reclaim_claimed_at IS NULL OR a.reclaim_claimed_at <= $6)"+
-		" RETURNING "+assetCols, id, token, now, now, legacyCutoff, staleBefore))
+		" AND (a.reclaim_token='' OR a.reclaim_claimed_at IS NULL OR a.reclaim_claimed_at <= $5)"+
+		" RETURNING "+assetCols, id, token, now, now, staleBefore))
 	if errors.Is(err, ErrNotFound) {
 		return Asset{}, false, nil
 	}
@@ -64,17 +63,16 @@ func (s *Store) ReleaseReclaimClaim(ctx context.Context, id, token string) error
 // DeleteClaimedAsset 凭认领令牌终删资产行：复核“pending + 未禁发 + 租约仍过期 + 无绑定 +
 // 令牌一致”后才删。续租/完成会清令牌并改租约/状态，绑定会让 NOT EXISTS 失败——
 // 主动方胜出，终删返回 deleted=false，调用方只释放、不重试。
-func (s *Store) DeleteClaimedAsset(ctx context.Context, id, token string, now time.Time, legacyCutoff time.Time) (bool, error) {
+func (s *Store) DeleteClaimedAsset(ctx context.Context, id, token string, now time.Time) (bool, error) {
 	if token == "" {
 		return false, errors.New("reclaim token required")
 	}
 	res, err := s.db.ExecContext(ctx, "DELETE FROM storage.assets"+
 		" WHERE id=$1 AND reclaim_token=$2"+
 		" AND status='pending' AND NOT blocked"+
-		" AND ((upload_expires_at IS NOT NULL AND upload_expires_at <= $3)"+
-		" OR (upload_expires_at IS NULL AND created_at <= $4))"+
+		" AND upload_expires_at <= $3"+
 		" AND NOT EXISTS (SELECT 1 FROM storage.bindings WHERE asset_id=storage.assets.id)",
-		id, token, now, legacyCutoff)
+		id, token, now)
 	if err != nil {
 		return false, err
 	}

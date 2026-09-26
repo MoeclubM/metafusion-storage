@@ -48,7 +48,6 @@ const themeScript = [
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const locale = normalizeLocale((await cookies()).get(localeCookieName)?.value);
-  const messages = getMessages(locale);
   return (
     <html lang={locale} className="dark" data-theme-mode="dark" suppressHydrationWarning>
       <head>
@@ -57,7 +56,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body className="antialiased">
         <I18nProvider initialLocale={locale}>
           <SessionProvider>
-            <AppShell subtitle={messages["common.appSubtitle"]}>{children}</AppShell>
+            <AppShell>{children}</AppShell>
           </SessionProvider>
         </I18nProvider>
       </body>

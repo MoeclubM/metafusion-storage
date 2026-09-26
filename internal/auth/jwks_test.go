@@ -91,6 +91,7 @@ func jwksTestToken(t *testing.T, key *rsa.PrivateKey, kid string) string {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"sub":                "11111111-1111-1111-1111-111111111111",
 		"preferred_username": "kana",
+		"token_use":          TokenUseSession,
 		"role":               "user",
 		"iss":                jwksTestIssuer,
 		"aud":                jwksTestAudience,
