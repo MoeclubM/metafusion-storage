@@ -12,6 +12,7 @@ import { assetContentUrl, assetDownloadUrl, fetchAsset, fetchAssets, previewKind
 import { useI18n } from "@/shared/i18n/I18nProvider";
 import { useSession } from "@/components/SessionProvider";
 import { PERMISSION_ASSET_MODERATE } from "@/lib/session";
+import { BASE_PATH } from "@/lib/app";
 
 export default function AssetsPage() {
   const { t, locale } = useI18n();
@@ -90,7 +91,8 @@ export default function AssetsPage() {
   const kind = asset ? previewKind(asset.mime_type) : "none";
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
+    <div className="order-2">
     {can(PERMISSION_ASSET_MODERATE) ? <Card>
       <SectionHeader title={t("assets.listTitle")} actions={<Button variant="ghost" onClick={() => void loadList(offset, filter)} busy={listLoading}>{t("common.refresh")}</Button>} />
       <div className="flex flex-wrap items-end gap-2">
@@ -107,7 +109,7 @@ export default function AssetsPage() {
       {rows.length > 0 ? <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[44rem] text-left text-xs">
         <thead className="border-b border-line text-text-faint"><tr><th className="px-3 py-2">{t("assets.field.fileName")}</th><th className="px-3 py-2">{t("assets.field.status")}</th><th className="px-3 py-2">{t("assets.field.sizeBytes")}</th><th className="px-3 py-2">{t("assets.field.createdAt")}</th></tr></thead>
         <tbody>{rows.map((row) => <tr key={row.id} className="border-b border-line-subtle align-top">
-          <td className="px-3 py-3"><div className="flex items-center gap-3">{row.status === "complete" && !row.blocked && previewKind(row.mime_type) === "image" ? <img src={assetContentUrl(row.id)} alt="" loading="lazy" className="h-12 w-12 shrink-0 rounded-control border border-line object-contain" /> : null}<div><Link href={`/assets?id=${encodeURIComponent(row.id)}`} onClick={(event) => { if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); setValue(row.id); window.history.replaceState(null, "", window.location.pathname + "?id=" + encodeURIComponent(row.id)); void load(row.id); }} className="font-medium text-primary hover:underline">{row.file_name || row.id}</Link><div className="font-mono text-[11px] text-text-faint">{row.id}</div></div></div></td>
+          <td className="px-3 py-3"><div className="flex items-center gap-3">{row.status === "complete" && !row.blocked && previewKind(row.mime_type) === "image" ? <img src={assetContentUrl(row.id)} alt="" loading="lazy" className="h-12 w-12 shrink-0 rounded-control border border-line object-contain" /> : null}<div><a href={`${BASE_PATH}/assets?id=${encodeURIComponent(row.id)}`} className="font-medium text-primary hover:underline">{row.file_name || row.id}</a><div className="font-mono text-[11px] text-text-faint">{row.id}</div></div></div></td>
           <td className="px-3 py-3"><StatusBadge status={row.status} /> {row.blocked ? <Badge tone="bad">{t("assets.blocked.yes")}</Badge> : null}</td>
           <td className="px-3 py-3">{formatBytes(row.size_bytes || row.declared_size, locale)}</td>
           <td className="px-3 py-3">{formatDateTime(row.created_at, locale)}</td>
@@ -115,6 +117,8 @@ export default function AssetsPage() {
       </table></div> : null}
       <div className="mt-3 flex items-center gap-2"><Button variant="ghost" disabled={offset === 0 || listLoading} onClick={() => void loadList(Math.max(0, offset - 50), filter)}>{t("moderation.previous")}</Button><span className="text-xs text-text-muted">{t("moderation.page", { page: Math.floor(offset / 50) + 1 })}</span><Button variant="ghost" disabled={!hasMore || listLoading} onClick={() => void loadList(offset + 50, filter)}>{t("moderation.next")}</Button></div>
     </Card> : null}
+    </div>
+    <div className="order-1">
     <Card>
       <SectionHeader
         icon="search"
@@ -276,6 +280,7 @@ export default function AssetsPage() {
         </div>
       ) : null}
     </Card>
+    </div>
     </div>
   );
 }
