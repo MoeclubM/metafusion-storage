@@ -21,16 +21,39 @@ export class ApiError extends Error {
 /** 界面文案用 Message 描述而不是字符串：字典在组件层解析，错误层不引入 i18n 依赖。 */
 export type Message = { key: string; vars?: Record<string, string | number> };
 
+let refreshPromise: Promise<boolean> | null = null;
+
+// 账号服务允许有效的服务端会话续期短时 JWT；并发列表请求共用一次续期。
+function refreshSession(): Promise<boolean> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch("/api/auth/refresh", { method: "POST", credentials: "include", cache: "no-store" });
+      return res.ok;
+    } catch {
+      return false;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(API_BASE.replace(/\/$/, "") + path, {
+    const url = API_BASE.replace(/\/$/, "") + path;
+    const options: RequestInit = {
       // no-store：可见性按请求判定，任何一层缓存复用都会把一次成功鉴权的响应发给无权者。
       cache: "no-store",
       credentials: "include",
       headers: { Accept: "application/json", ...(init?.headers ?? {}) },
       ...init,
-    });
+    };
+    res = await fetch(url, options);
+    if (res.status === 401 && await refreshSession()) {
+      res = await fetch(url, options);
+    }
   } catch (err) {
     throw new Error("NETWORK:" + (err instanceof Error ? err.message : String(err)));
   }
