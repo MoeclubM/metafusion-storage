@@ -6,6 +6,7 @@
 //      界面必须讲成"该绑定已不存在（可能已被别人解除）"，不能当成失败吓人；
 //   2. 无论成功还是 404，都**重新取数**：成功要拿掉那一行，404 说明手上这份列表已经过期。
 import React from "react";
+import Link from "next/link";
 import { ApiError, describeApiError, type Message } from "@/lib/api";
 import { deleteBinding, type Asset, type Binding } from "@/lib/storage";
 import { formatDateTime } from "@/lib/format";
@@ -91,7 +92,7 @@ export function BindingTable({
                 <tr key={row.id} className="border-t border-line/60 align-top">
                   {showAsset ? (
                     <td className="px-3 py-2">
-                      <div className="font-mono text-[11px] text-text-body">{row.asset?.file_name ?? t("common.unknownValue")}</div>
+                      <Link href={`/assets?id=${encodeURIComponent(row.asset_id)}`} className="font-mono text-[11px] text-primary hover:underline">{row.asset?.file_name ?? row.asset_id}</Link>
                       <div className="font-mono text-[10px] text-text-faint">{row.asset_id}</div>
                     </td>
                   ) : null}

@@ -70,6 +70,8 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.DELETE("/bindings/:id", v.Required(), h.unbind)
 		api.POST("/verify-hash", v.Middleware(), h.verifyHash)
 		api.GET("/assets/:id", v.Middleware(), h.getAsset)
+		api.GET("/assets", v.Required(), h.listAssets)
+		api.GET("/bindings", v.Required(), h.listBindings)
 		api.GET("/moderation/blocked", v.Required(), h.listBlockedAssets)
 		api.GET("/assets/:id/content", v.Middleware(), h.assetContent)
 		api.GET("/entities/:id/files", v.Middleware(), h.listEntityFiles)

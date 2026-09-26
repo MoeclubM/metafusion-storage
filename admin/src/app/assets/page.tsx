@@ -8,7 +8,7 @@ import { Badge, Button, Card, CopyField, DataList, EmptyState, Icon, Notice, Sec
 import { BindingTable } from "@/components/BindingTable";
 import { ApiError, describeApiError, normalizeIdInput, type Message } from "@/lib/api";
 import { formatBytes, formatDateTime, isUuid } from "@/lib/format";
-import { assetContentUrl, assetDownloadUrl, fetchAsset, previewKind, type AssetResponse } from "@/lib/storage";
+import { assetContentUrl, assetDownloadUrl, fetchAsset, fetchAssets, previewKind, type Asset, type AssetResponse } from "@/lib/storage";
 import { useI18n } from "@/shared/i18n/I18nProvider";
 import { useSession } from "@/components/SessionProvider";
 import { PERMISSION_ASSET_MODERATE } from "@/lib/session";
@@ -21,6 +21,35 @@ export default function AssetsPage() {
   const [data, setData] = useState<AssetResponse | null>(null);
   const [error, setError] = useState<Message | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rows, setRows] = useState<Asset[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState<Message | null>(null);
+  const [status, setStatus] = useState("");
+  const [name, setName] = useState("");
+  const [filter, setFilter] = useState({ status: "", name: "" });
+
+  const loadList = useCallback(async (nextOffset: number, nextFilter: { status: string; name: string }) => {
+    setListLoading(true);
+    setListError(null);
+    try {
+      const result = await fetchAssets(50, nextOffset, nextFilter.status, nextFilter.name);
+      setRows(result.assets);
+      setHasMore(result.has_more);
+      setOffset(nextOffset);
+      setFilter(nextFilter);
+    } catch (err) {
+      setRows([]);
+      setListError(describeApiError(err));
+    } finally {
+      setListLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (can(PERMISSION_ASSET_MODERATE)) void loadList(0, { status: "", name: "" });
+  }, [can, loadList]);
 
   const load = useCallback(async (assetId: string) => {
     setLoading(true);
@@ -61,6 +90,31 @@ export default function AssetsPage() {
   const kind = asset ? previewKind(asset.mime_type) : "none";
 
   return (
+    <div className="space-y-4">
+    {can(PERMISSION_ASSET_MODERATE) ? <Card>
+      <SectionHeader title={t("assets.listTitle")} actions={<Button variant="ghost" onClick={() => void loadList(offset, filter)} busy={listLoading}>{t("common.refresh")}</Button>} />
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-40 flex-1"><TextInput value={name} onChange={setName} label={t("assets.filterName")} onSubmit={() => void loadList(0, { status, name: name.trim() })} /></div>
+        <label className="flex flex-col gap-1 text-xs text-text-muted">{t("assets.filterStatus")}
+          <select className="min-h-10 rounded-control border border-line bg-surface px-3 text-text-body" value={status} onChange={(event) => setStatus(event.target.value)}>
+            <option value="">{t("assets.allStatus")}</option><option value="complete">{t("assets.status.complete")}</option><option value="pending">{t("assets.status.pending")}</option>
+          </select>
+        </label>
+        <Button onClick={() => void loadList(0, { status, name: name.trim() })} busy={listLoading}>{t("assets.query")}</Button>
+      </div>
+      {listError ? <div className="mt-3"><Notice tone="error">{text(listError)}</Notice></div> : null}
+      {!listLoading && rows.length === 0 && !listError ? <div className="mt-3"><EmptyState>{t("assets.listEmpty")}</EmptyState></div> : null}
+      {rows.length > 0 ? <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[44rem] text-left text-xs">
+        <thead className="border-b border-line text-text-faint"><tr><th className="px-3 py-2">{t("assets.field.fileName")}</th><th className="px-3 py-2">{t("assets.field.status")}</th><th className="px-3 py-2">{t("assets.field.sizeBytes")}</th><th className="px-3 py-2">{t("assets.field.createdAt")}</th></tr></thead>
+        <tbody>{rows.map((row) => <tr key={row.id} className="border-b border-line-subtle align-top">
+          <td className="px-3 py-3"><div className="flex items-center gap-3">{row.status === "complete" && !row.blocked && previewKind(row.mime_type) === "image" ? <img src={assetContentUrl(row.id)} alt="" loading="lazy" className="h-12 w-12 shrink-0 rounded-control border border-line object-contain" /> : null}<div><Link href={`/assets?id=${encodeURIComponent(row.id)}`} onClick={(event) => { if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); setValue(row.id); window.history.replaceState(null, "", window.location.pathname + "?id=" + encodeURIComponent(row.id)); void load(row.id); }} className="font-medium text-primary hover:underline">{row.file_name || row.id}</Link><div className="font-mono text-[11px] text-text-faint">{row.id}</div></div></div></td>
+          <td className="px-3 py-3"><StatusBadge status={row.status} /> {row.blocked ? <Badge tone="bad">{t("assets.blocked.yes")}</Badge> : null}</td>
+          <td className="px-3 py-3">{formatBytes(row.size_bytes || row.declared_size, locale)}</td>
+          <td className="px-3 py-3">{formatDateTime(row.created_at, locale)}</td>
+        </tr>)}</tbody>
+      </table></div> : null}
+      <div className="mt-3 flex items-center gap-2"><Button variant="ghost" disabled={offset === 0 || listLoading} onClick={() => void loadList(Math.max(0, offset - 50), filter)}>{t("moderation.previous")}</Button><span className="text-xs text-text-muted">{t("moderation.page", { page: Math.floor(offset / 50) + 1 })}</span><Button variant="ghost" disabled={!hasMore || listLoading} onClick={() => void loadList(offset + 50, filter)}>{t("moderation.next")}</Button></div>
+    </Card> : null}
     <Card>
       <SectionHeader
         icon="search"
@@ -143,6 +197,7 @@ export default function AssetsPage() {
                 { label: t("assets.field.mimeType"), value: asset.mime_type, mono: true },
                 { label: t("assets.field.uploader"), value: asset.uploader_id, mono: true },
                 { label: t("assets.field.createdAt"), value: formatDateTime(asset.created_at, locale) },
+                asset.upload_expires_at ? { label: t("assets.field.uploadExpiresAt"), value: formatDateTime(asset.upload_expires_at, locale) } : null,
                 { label: t("assets.field.completedAt"), value: formatDateTime(asset.completed_at, locale) },
                 asset.fail_reason
                   ? { label: t("assets.field.failReason"), value: asset.fail_reason, mono: true }
@@ -166,7 +221,9 @@ export default function AssetsPage() {
             <h3 className="mb-1 text-xs font-semibold text-text-strong">{t("assets.previewTitle")}</h3>
             <p className="mb-3 text-[11px] leading-relaxed text-text-muted">{t("assets.previewNote")}</p>
 
-            {asset.status !== "complete" ? (
+            {asset.blocked ? (
+              <Notice tone="warn">{t("assets.previewBlocked")}</Notice>
+            ) : asset.status !== "complete" ? (
               <Notice tone="warn">{t("assets.previewNotComplete", { status: asset.status })}</Notice>
             ) : kind === "image" ? (
               <img
@@ -219,6 +276,7 @@ export default function AssetsPage() {
         </div>
       ) : null}
     </Card>
+    </div>
   );
 }
 

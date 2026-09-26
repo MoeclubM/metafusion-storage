@@ -2,7 +2,7 @@
 // 绑定解绑工作台：存储服务只提供"删绑定"这一个绑定类端点（没有按 id 读绑定的接口），
 // 因此入口按能"看到绑定"的三种方式来组织：按资产、按实体、直接按绑定 id。
 // 前两种能在解绑后重新取数，第三种只能报结果——没有列表可刷新，界面上照实写明。
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { BindingTable } from "@/components/BindingTable";
 import {
   Button,
@@ -18,14 +18,38 @@ import {
 } from "@/components/ui";
 import { ApiError, describeApiError, type Message } from "@/lib/api";
 import { extractUuid, formatBytes } from "@/lib/format";
-import { deleteBinding, fetchAsset, fetchEntityFiles, type AssetResponse, type EntityFilesResponse } from "@/lib/storage";
+import { deleteBinding, fetchAsset, fetchBindings, fetchEntityFiles, type AssetResponse, type EntityFilesResponse, type FileBinding } from "@/lib/storage";
 import { useI18n } from "@/shared/i18n/I18nProvider";
+import { useSession } from "@/components/SessionProvider";
+import { PERMISSION_ASSET_MODERATE } from "@/lib/session";
 
 type Mode = "asset" | "entity" | "binding";
 
 export default function BindingsPage() {
   const { t, locale } = useI18n();
   const text = useMessage();
+  const { can } = useSession();
+  const [list, setList] = useState<FileBinding[]>([]);
+  const [listOffset, setListOffset] = useState(0);
+  const [listMore, setListMore] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState<Message | null>(null);
+
+  const loadList = useCallback(async (offset: number) => {
+    setListLoading(true);
+    setListError(null);
+    try {
+      const result = await fetchBindings(50, offset);
+      setList(result.bindings);
+      setListMore(result.has_more);
+      setListOffset(offset);
+    } catch (err) {
+      setList([]);
+      setListError(describeApiError(err));
+    } finally { setListLoading(false); }
+  }, []);
+
+  useEffect(() => { if (can(PERMISSION_ASSET_MODERATE)) void loadList(0); }, [can, loadList]);
 
   const [mode, setMode] = useState<Mode>("asset");
 
@@ -129,6 +153,12 @@ export default function BindingsPage() {
 
   return (
     <div className="space-y-4">
+      {can(PERMISSION_ASSET_MODERATE) ? <Card>
+        <SectionHeader title={t("bindings.listTitle")} actions={<Button variant="ghost" onClick={() => void loadList(listOffset)} busy={listLoading}>{t("common.refresh")}</Button>} />
+        {listError ? <Notice tone="error">{text(listError)}</Notice> : null}
+        <BindingTable rows={list} title={t("bindings.listTitle")} emptyLabel={t("bindings.listEmpty")} loading={listLoading} onReload={() => loadList(listOffset)} showAsset />
+        <div className="mt-3 flex items-center gap-2"><Button variant="ghost" disabled={listOffset === 0 || listLoading} onClick={() => void loadList(Math.max(0, listOffset - 50))}>{t("moderation.previous")}</Button><span className="text-xs text-text-muted">{t("moderation.page", { page: Math.floor(listOffset / 50) + 1 })}</span><Button variant="ghost" disabled={!listMore || listLoading} onClick={() => void loadList(listOffset + 50)}>{t("moderation.next")}</Button></div>
+      </Card> : null}
       <Card>
         <SectionHeader icon="unlink" title={t("bindings.title")} desc={t("bindings.desc")} />
 

@@ -21,6 +21,7 @@ export type Asset = {
   blocked: boolean;
   blocked_reason?: string;
   blocked_at?: string | null;
+  upload_expires_at?: string | null;
 };
 
 export type Binding = {
@@ -52,6 +53,20 @@ export function fetchStats(): Promise<StatsResponse> {
 }
 
 export type BlockedAssetsResponse = { assets: Asset[]; limit: number; offset: number };
+
+export type AssetListResponse = { assets: Asset[]; limit: number; offset: number; has_more: boolean };
+export type BindingListResponse = { bindings: FileBinding[]; limit: number; offset: number; has_more: boolean };
+
+export function fetchAssets(limit = 50, offset = 0, status = "", name = ""): Promise<AssetListResponse> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (status) query.set("status", status);
+  if (name) query.set("name", name);
+  return apiGet<AssetListResponse>(`/assets?${query}`);
+}
+
+export function fetchBindings(limit = 50, offset = 0): Promise<BindingListResponse> {
+  return apiGet<BindingListResponse>(`/bindings?limit=${limit}&offset=${offset}`);
+}
 
 export function fetchBlockedAssets(limit = 100, offset = 0): Promise<BlockedAssetsResponse> {
   return apiGet<BlockedAssetsResponse>(`/moderation/blocked?limit=${limit}&offset=${offset}`);
