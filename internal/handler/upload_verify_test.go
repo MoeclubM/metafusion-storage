@@ -126,7 +126,7 @@ func (h *uploadHarness) token(subject string) string {
 	payload := jwt.MapClaims{
 		"sub":                subject,
 		"preferred_username": "tester",
-		"role":               "user",
+		"token_use":          "session",
 		"permissions":        []string{auth.PermissionAssetUpload},
 		"iss":                testIssuer,
 		"aud":                testAudience,

@@ -73,15 +73,17 @@ func TestVerifiedAssetByHashPreferringVerified(t *testing.T) {
 	key := objs.KeyFor(sha, "track.flac")
 
 	const uploader = "77777777-7777-7777-7777-777777777777"
+	lease := time.Now().Add(time.Hour)
 	asset := Asset{
-		ID:           uuid.NewString(),
-		SHA256:       sha,
-		DeclaredSize: int64(len(correct)),
-		MimeType:     "audio/flac",
-		FileName:     "track.flac",
-		ObjectKey:    key,
-		Status:       "pending",
-		UploaderID:   uploader,
+		ID:              uuid.NewString(),
+		SHA256:          sha,
+		DeclaredSize:    int64(len(correct)),
+		MimeType:        "audio/flac",
+		FileName:        "track.flac",
+		ObjectKey:       key,
+		Status:          "pending",
+		UploaderID:      uploader,
+		UploadExpiresAt: &lease,
 	}
 	if err = s.CreateAsset(ctx, asset); err != nil {
 		t.Fatalf("create asset: %v", err)

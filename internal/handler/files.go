@@ -154,7 +154,10 @@ func (h *Handler) assetContent(c *gin.Context) {
 		fail(c, 500, "module_error")
 		return
 	}
-	if h.denyUnreadable(c, asset) || asset.Status != "complete" {
+	if h.denyUnreadable(c, asset) {
+		return
+	}
+	if asset.Status != "complete" {
 		fail(c, 404, "not_found")
 		return
 	}

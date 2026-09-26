@@ -65,15 +65,17 @@ func TestAssetLifecycleAndLocalObjects(t *testing.T) {
 
 	const uploader = "77777777-7777-7777-7777-777777777777"
 	const entity = "88888888-8888-8888-8888-888888888888"
+	lease := time.Now().Add(time.Hour)
 	asset := Asset{
-		ID:           uuid.NewString(),
-		SHA256:       digest,
-		DeclaredSize: size,
-		MimeType:     "audio/flac",
-		FileName:     "track.flac",
-		ObjectKey:    key,
-		Status:       "pending",
-		UploaderID:   uploader,
+		ID:              uuid.NewString(),
+		SHA256:          digest,
+		DeclaredSize:    size,
+		MimeType:        "audio/flac",
+		FileName:        "track.flac",
+		ObjectKey:       key,
+		Status:          "pending",
+		UploaderID:      uploader,
+		UploadExpiresAt: &lease,
 	}
 	if err = s.CreateAsset(ctx, asset); err != nil {
 		t.Fatalf("create asset: %v", err)

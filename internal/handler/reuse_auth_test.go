@@ -57,7 +57,7 @@ func TestReuseRequiresReadabilityAndRebindPermission(t *testing.T) {
 		payload := jwt.MapClaims{
 			"sub":                subject,
 			"preferred_username": "tester-" + subject[:8],
-			"role":               "user",
+			"token_use":          "session",
 			"permissions":        []string{auth.PermissionAssetUpload},
 			"iss":                testIssuer,
 			"aud":                testAudience,

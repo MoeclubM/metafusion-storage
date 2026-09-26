@@ -97,9 +97,9 @@ func newQuotaHarness(t *testing.T, useS3 bool) *quotaHarness {
 func (h *quotaHarness) token(subject string) string {
 	h.t.Helper()
 	payload := jwt.MapClaims{
-		"sub": subject, "preferred_username": "tester", "role": "user",
+		"sub": subject, "preferred_username": "tester", "token_use": "session",
 		"permissions": []string{auth.PermissionAssetUpload},
-		"iss": testIssuer, "aud": testAudience,
+		"iss":         testIssuer, "aud": testAudience,
 		"exp": time.Now().Add(10 * time.Minute).Unix(), "iat": time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, payload)
@@ -198,7 +198,7 @@ func TestQuotaZeroDeclaredStreamRedeem(t *testing.T) {
 		ID: uuid.NewString(), SHA256: fillSHA, DeclaredSize: mb - 10,
 		MimeType: "application/octet-stream", FileName: "fill.bin",
 		ObjectKey: "objects/" + fillSHA[:2] + "/" + fillSHA + "/fill.bin",
-		Status: "pending", UploaderID: "77777777-7777-7777-7777-777777777777",
+		Status:    "pending", UploaderID: "77777777-7777-7777-7777-777777777777",
 		UploadExpiresAt: &lease,
 	}); err != nil {
 		t.Fatalf("filler: %v", err)
@@ -275,7 +275,7 @@ func TestQuotaPresignedCompleteRedeem(t *testing.T) {
 		ID: uuid.NewString(), SHA256: fillSHA, DeclaredSize: mb - 10,
 		MimeType: "application/octet-stream", FileName: "fill.bin",
 		ObjectKey: "objects/" + fillSHA[:2] + "/" + fillSHA + "/fill.bin",
-		Status: "pending", UploaderID: "77777777-7777-7777-7777-777777777777",
+		Status:    "pending", UploaderID: "77777777-7777-7777-7777-777777777777",
 		UploadExpiresAt: &lease,
 	}); err != nil {
 		t.Fatalf("filler: %v", err)
