@@ -153,12 +153,6 @@ export default function BindingsPage() {
 
   return (
     <div className="space-y-4">
-      {can(PERMISSION_ASSET_MODERATE) ? <Card>
-        <SectionHeader title={t("bindings.listTitle")} actions={<Button variant="ghost" onClick={() => void loadList(listOffset)} busy={listLoading}>{t("common.refresh")}</Button>} />
-        {listError ? <Notice tone="error">{text(listError)}</Notice> : null}
-        <BindingTable rows={list} title={t("bindings.listTitle")} emptyLabel={t("bindings.listEmpty")} loading={listLoading} onReload={() => loadList(listOffset)} showAsset />
-        <div className="mt-3 flex items-center gap-2"><Button variant="ghost" disabled={listOffset === 0 || listLoading} onClick={() => void loadList(Math.max(0, listOffset - 50))}>{t("moderation.previous")}</Button><span className="text-xs text-text-muted">{t("moderation.page", { page: Math.floor(listOffset / 50) + 1 })}</span><Button variant="ghost" disabled={!listMore || listLoading} onClick={() => void loadList(listOffset + 50)}>{t("moderation.next")}</Button></div>
-      </Card> : null}
       <Card>
         <SectionHeader icon="unlink" title={t("bindings.title")} desc={t("bindings.desc")} />
 
@@ -324,6 +318,13 @@ export default function BindingsPage() {
           </div>
         </Card>
       ) : null}
+
+      {can(PERMISSION_ASSET_MODERATE) ? <Card>
+        <div className="mb-3 flex justify-end"><Button variant="ghost" onClick={() => void loadList(listOffset)} busy={listLoading}>{t("common.refresh")}</Button></div>
+        {listError ? <Notice tone="error">{text(listError)}</Notice> : null}
+        <BindingTable rows={list} title={t("bindings.listTitle")} emptyLabel={t("bindings.listEmpty")} loading={listLoading} onReload={() => loadList(listOffset)} showAsset />
+        <div className="mt-3 flex items-center gap-2"><Button variant="ghost" disabled={listOffset === 0 || listLoading} onClick={() => void loadList(Math.max(0, listOffset - 50))}>{t("moderation.previous")}</Button><span className="text-xs text-text-muted">{t("moderation.page", { page: Math.floor(listOffset / 50) + 1 })}</span><Button variant="ghost" disabled={!listMore || listLoading} onClick={() => void loadList(listOffset + 50)}>{t("moderation.next")}</Button></div>
+      </Card> : null}
 
       <ConfirmDialog
         open={confirmBinding !== null}
