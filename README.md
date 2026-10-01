@@ -222,7 +222,7 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 }
 ```
 
-主仓 compose 需要改的变量见 `docs/main-repo-compose-vars.md`（只列清单，不动主仓文件）。
+主仓编排与角色配置见主仓 [数据库角色](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/database-roles.md) 与 [存储运行约定](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/storage-operations.md)。本服务使用目标桶的 `STORAGE_S3_ACCESS_KEY` / `STORAGE_S3_SECRET_KEY`；桶由运维身份预建时设置 `STORAGE_S3_SKIP_BUCKET_ENSURE=true`。容量、并发、签名时效及回收参数见本 README 的配置和 worker 章节，不另维护 Compose 变量准备稿。
 
 ### 完成上传时的内容校验（P1 完整性约束）
 
@@ -287,9 +287,7 @@ DDL 与记账同事务提交，账本表是 `storage.schema_migrations(version, 
 - 账本只记"这一版执行过"，不校验结构本身。手工删过表而账本还在时启动不会重建，
   这种情况删掉对应账本行（`DELETE FROM storage.schema_migrations WHERE version='000001_init'`）再重启。
 
-`sql/roles.example.sql` 是本仓库数据层隔离的旧准备件，当前主仓库已有统一授权源 `deploy/sql/roles-least-privilege.sql`、验证脚本 `deploy/sql/verify-role-isolation.sql`，并在 compose 中通过 `STORAGE_DATABASE_URL` 为服务配置 `mf_storage` 角色。不要把本文件当作主仓库的一键部署入口或独立权威授权脚本；跨服务角色模型与落地步骤以主仓库 [database-roles.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/database-roles.md) 及上述统一 SQL 为准。
-审计表是例外：它在跨服务共用的 `audit` schema 里（可能由别的服务先建），因此该文件对 `audit`
-另授 `USAGE` + `SELECT, INSERT`，否则本服务的审计行会全部写失败（业务不受影响，但留痕静默缺失）。
+数据库授权统一使用主仓 `deploy/sql/roles-least-privilege.sql` 与 `deploy/sql/verify-role-isolation.sql`，Compose 通过 `STORAGE_DATABASE_URL` 为服务配置 `mf_storage` 角色；本仓旧角色样例已移除。跨服务角色、共享 `audit` schema 的追加权限与回滚以主仓 [database-roles.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/database-roles.md) 及统一 SQL 为准，避免维护第二套角色名称和授权规则。
 
 ## 审计留痕
 
