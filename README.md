@@ -39,6 +39,8 @@ JWKS 拉取**刻意不走**这套执行器：公钥拉取自带 10 分钟缓存�
 | POST | `/assets/{id}/block` | 审核者 | 禁发：只翻禁发位，不删绑定、不改校验状态，误禁可逆 |
 | POST | `/assets/{id}/unblock` | 审核者 | 解禁：原状态即恢复分发资格（仍需满足另两态） |
 | GET | `/moderation/blocked` | 审核者 | 禁发资产清单，支持 `limit`（1–500，默认 100）与 `offset` 分页 |
+| GET | `/assets` | 审核者 | 全站资产浏览：`limit`（缺省 50、上限 100）、`offset`、`status`（`pending` / `complete`）、`name`（文件名过滤，最多 100 字节）；返回 `assets`、`limit`、`offset`、`has_more` |
+| GET | `/bindings` | 审核者 | 全站绑定浏览：同样使用 `limit` / `offset`，返回 `bindings`、`limit`、`offset`、`has_more` |
 | GET | `/assets/{id}` | 可读 | 文件元数据 + 绑定列表 |
 | GET | `/assets/{id}/content` | 可读（允许匿名） | **原样**内联分发对象内容（不转码）：给目录数据里需要长期引用、能被 `<img>` 直接加载的地址用；`download` 在对象存储模式下只回预签名地址（会过期、Host 是对象存储端点），不能当稳定地址。位图等展示类型走 `inline`，脚本可执行类型走 `attachment`；响应带 `ETag`（内容摘要）并支持 `If-None-Match` → `304` |
 | GET | `/entities/{id}/files` | 实体可见 | 「这个介质/轨道/表达上挂了哪些文件」入口 |

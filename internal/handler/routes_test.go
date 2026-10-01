@@ -17,8 +17,10 @@ import (
 // 内容寻址直传 + 绑定用途 + 统一下载入口。改动路由会在这里失败。
 var frozenRoutes = []string{
 	"DELETE /api/storage/bindings/:id",
+	"GET /api/storage/assets",
 	"GET /api/storage/assets/:id",
 	"GET /api/storage/assets/:id/content",
+	"GET /api/storage/bindings",
 	"GET /api/storage/download/:assetId",
 	"GET /api/storage/entities/:id/files",
 	"GET /api/storage/moderation/blocked",
