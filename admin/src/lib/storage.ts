@@ -15,6 +15,10 @@ export type Asset = {
   multipart_upload_id?: string;
   hash_verified: boolean;
   uploader_id: string;
+  upload_expires_at?: string | null;
+  blocked: boolean;
+  blocked_reason?: string;
+  blocked_at?: string | null;
   fail_reason?: string;
   created_at: string;
   completed_at?: string | null;

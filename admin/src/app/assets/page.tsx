@@ -113,6 +113,20 @@ export default function AssetsPage() {
                 { label: t("assets.field.id"), value: asset.id, mono: true },
                 { label: t("assets.field.status"), value: <StatusBadge status={asset.status} /> },
                 {
+                  label: t("assets.field.blocked"),
+                  value: (
+                    <Badge tone={asset.blocked ? "bad" : "ok"}>
+                      {t(asset.blocked ? "assets.distribution.blocked" : "assets.distribution.allowed")}
+                    </Badge>
+                  ),
+                },
+                asset.blocked_reason
+                  ? { label: t("assets.field.blockedReason"), value: asset.blocked_reason }
+                  : null,
+                asset.blocked_at
+                  ? { label: t("assets.field.blockedAt"), value: formatDateTime(asset.blocked_at, locale) }
+                  : null,
+                {
                   label: t("assets.field.hashVerified"),
                   value: (
                     <span className="inline-flex flex-wrap items-center gap-2">
@@ -137,6 +151,9 @@ export default function AssetsPage() {
                 { label: t("assets.field.uploader"), value: asset.uploader_id, mono: true },
                 { label: t("assets.field.createdAt"), value: formatDateTime(asset.created_at, locale) },
                 { label: t("assets.field.completedAt"), value: formatDateTime(asset.completed_at, locale) },
+                asset.upload_expires_at
+                  ? { label: t("assets.field.uploadExpiresAt"), value: formatDateTime(asset.upload_expires_at, locale) }
+                  : null,
                 asset.fail_reason
                   ? { label: t("assets.field.failReason"), value: asset.fail_reason, mono: true }
                   : null,
