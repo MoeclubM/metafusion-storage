@@ -42,10 +42,19 @@ func TestEntityFilesReportsUpstreamUnavailable(t *testing.T) {
 			wantErr:  upstream.CodeUpstreamUnavailable,
 		},
 		{
-			name:     "目录服务明确说不可见",
-			catalog:  func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+			name: "目录服务明确说不可见",
+			catalog: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			},
 			wantCode: http.StatusNotFound,
 			wantErr:  "not_found",
+		},
+		{
+			name:     "目录身份接口缺失",
+			catalog:  func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
+			wantCode: http.StatusServiceUnavailable,
+			wantErr:  upstream.CodeUpstreamUnavailable,
 		},
 	}
 	for _, tc := range cases {

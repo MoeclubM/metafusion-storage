@@ -20,11 +20,9 @@ func TestVisibleFollowsMergedIdentity(t *testing.T) {
 	var resolved bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/catalog/entities/" + oldID:
-			w.WriteHeader(http.StatusNotFound)
-		case "/api/catalog/entities/" + oldID + "/resolve":
+		case "/api/catalog/entities/" + oldID + "/identity":
 			resolved = true
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": newID, "kind": "work"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"canonical_id": newID, "aliases": []string{oldID}, "entity": map[string]any{"id": newID, "kind": "work"}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -44,15 +42,16 @@ func TestVisibleStillHidesUnresolvableEntity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
 	}))
 	defer srv.Close()
 	_, err := New(srv.URL).Visible(context.Background(), "33333333-3333-3333-3333-333333333333", "", "")
 	if !errors.Is(err, ErrNotVisible) {
 		t.Fatalf("不可见实体应返回 ErrNotVisible，实际 err=%v", err)
 	}
-	// 4xx 是上游的明确回答，不做重试：两次请求分别是本体与 /resolve，各一次。
-	if n := atomic.LoadInt32(&hits); n != 2 {
-		t.Fatalf("404 不该重试（本体 + /resolve 各一次），实际请求 %d 次", n)
+	// 明确的 not_found 不重试，也不调用旧实体或 /resolve 路径。
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Fatalf("not_found 应只请求一次，实际请求 %d 次", n)
 	}
 }
 

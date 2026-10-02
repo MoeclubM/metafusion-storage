@@ -41,9 +41,8 @@ func TestIdentityReturnsCanonicalAndAliases(t *testing.T) {
 	}
 }
 
-// 旧目录没有 identity 端点：对一切 id 都是 404，此时按旧 /resolve 跟随合并重定向，
-// 不能直接报不可见——否则旧目录下所有文件列表都变 404。
-func TestIdentityFallsBackToResolveOnLegacyDirectory(t *testing.T) {
+// 旧目录缺少 identity 是协议错误，不能退回不完整的别名集合。
+func TestIdentityRejectsLegacyDirectory(t *testing.T) {
 	const oldID = "33333333-3333-3333-3333-333333333333"
 	const newID = "44444444-4444-4444-4444-444444444444"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,20 +55,17 @@ func TestIdentityFallsBackToResolveOnLegacyDirectory(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	v, err := New(srv.URL).Identity(context.Background(), oldID, "", "")
-	if err != nil {
-		t.Fatalf("旧路径 Identity 失败: %v", err)
-	}
-	if v.CanonicalID != newID || v.Entity.Kind != "track" {
-		t.Fatalf("旧路径存活身份不符: %+v", v)
+	_, err := New(srv.URL).Identity(context.Background(), oldID, "", "")
+	if err == nil || errors.Is(err, ErrNotVisible) {
+		t.Fatalf("缺失接口应返回依赖错误，实际 %v", err)
 	}
 }
 
-// 真正不可见的实体：本体与 /resolve 都 404，返回 ErrNotVisible（调用方 404，
-// 不是 503，更不是空列表）。
+// 真正不可见的实体返回明确的 not_found，按 ErrNotVisible 处理。
 func TestIdentityStillHidesUnresolvableEntity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
 	}))
 	defer srv.Close()
 	if _, err := New(srv.URL).Identity(context.Background(), "55555555-5555-5555-5555-555555555555", "", ""); !errors.Is(err, ErrNotVisible) {
@@ -91,5 +87,35 @@ func TestAliasSetDedups(t *testing.T) {
 	}
 	if got := AliasSet("d", "d"); len(got) != 1 || got[0] != "d" {
 		t.Fatalf("单 ID 应退化为自身：%v", got)
+	}
+}
+
+func TestIdentityContractFailuresAreNotVisibilityDecisions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"missing endpoint", 404, `404 page not found`},
+		{"forbidden", 403, `{"error":"forbidden"}`},
+		{"empty kind", 200, `{"canonical_id":"a","entity":{"id":"a"}}`},
+		{"conflicting canonical", 200, `{"canonical_id":"a","entity":{"id":"b","kind":"work"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hits := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			_, err := New(server.URL).Visible(context.Background(), "a", "", "")
+			if err == nil || errors.Is(err, ErrNotVisible) {
+				t.Fatalf("protocol failure became a visibility decision: %v", err)
+			}
+			if hits != 1 {
+				t.Fatalf("unexpected legacy fallback: %d requests", hits)
+			}
+		})
 	}
 }
