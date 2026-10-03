@@ -33,8 +33,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-30 border-b border-line bg-surface/90 backdrop-blur">
-        <div className="mx-auto flex h-14 w-full max-w-page items-center justify-between gap-3 px-4 sm:px-6">
-          <div className="flex min-w-0 items-center gap-3">
+        <div className="mx-auto flex min-h-14 flex-wrap py-2 w-full max-w-page items-center justify-between gap-3 px-4 sm:px-6">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <a href="/admin" className="inline-flex shrink-0 items-center gap-1 text-xs text-text-muted hover:text-text-strong"><span aria-hidden="true">←</span>{t("nav.backToHub")}</a>
             <span className="text-text-faint">/</span>
             <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-text-strong"><Icon name="shield" className="h-4 w-4 shrink-0 text-primary" /><span className="truncate">{t("common.appName")}</span></div>

@@ -83,7 +83,7 @@ export function Button({ children, onClick, type = "button", variant = "primary"
   const styles: Record<string, string> = {
     primary: "bg-primary text-white hover:bg-primary-hover border border-transparent",
     ghost: "border border-line text-text-body hover:bg-surfaceHover",
-    danger: "border border-red-500/40 text-red-400 hover:bg-red-500/10",
+    danger: "border border-red-500/40 text-danger hover:bg-red-500/10",
   };
   return (
     <button
@@ -146,9 +146,9 @@ export function TextInput({
 export function Badge({ children, tone = "neutral" }: { children: React.ReactNode; tone?: "neutral" | "ok" | "warn" | "bad" }) {
   const tones: Record<string, string> = {
     neutral: "border-line text-text-muted",
-    ok: "border-emerald-500/40 text-emerald-400",
-    warn: "border-amber-500/40 text-amber-400",
-    bad: "border-red-500/40 text-red-400",
+    ok: "border-emerald-500/40 text-success",
+    warn: "border-amber-500/40 text-warn",
+    bad: "border-red-500/40 text-danger",
   };
   return (
     <span className={"inline-flex items-center gap-1 rounded-chip border px-2 py-0.5 font-mono text-[11px] " + tones[tone]}>
@@ -168,13 +168,13 @@ export function Notice({
 }) {
   const tones: Record<string, { box: string; icon: string; mark: string }> = {
     info: { box: "border-line bg-surfaceSubtle", icon: "text-primary", mark: "info" },
-    ok: { box: "border-emerald-500/30 bg-emerald-500/5", icon: "text-emerald-400", mark: "check" },
-    warn: { box: "border-amber-500/30 bg-amber-500/5", icon: "text-amber-400", mark: "alert" },
-    error: { box: "border-red-500/30 bg-red-500/5", icon: "text-red-400", mark: "alert" },
+    ok: { box: "border-emerald-500/30 bg-emerald-500/5", icon: "text-success", mark: "check" },
+    warn: { box: "border-amber-500/30 bg-amber-500/5", icon: "text-warn", mark: "alert" },
+    error: { box: "border-red-500/30 bg-red-500/5", icon: "text-danger", mark: "alert" },
   };
   const tone_ = tones[tone];
   return (
-    <div className={"rounded-card border p-3 text-xs leading-relaxed " + tone_.box} role={tone === "error" ? "alert" : undefined}>
+    <div className={"rounded-card border p-3 text-xs leading-relaxed " + tone_.box} role={tone === "error" ? "alert" : tone === "ok" ? "status" : undefined}>
       <div className="flex items-start gap-2">
         <span className={"mt-0.5 shrink-0 " + tone_.icon}>
           <Icon name={tone_.mark} className="w-4 h-4" />
@@ -208,9 +208,11 @@ export function DataList({ items }: { items: { label: string; value: React.React
 export function CopyField({ value, label }: { value: string; label: string }) {
   const { t } = useI18n();
   const [copied, setCopied] = React.useState(false);
+  const [failed, setFailed] = React.useState(false);
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <code className="min-w-0 flex-1 truncate rounded-control border border-line bg-surfaceSubtle px-2 py-1.5 font-mono text-[11px] text-text-body">
+    <div className="space-y-2">
+    <div className="flex min-w-0 items-start gap-2">
+      <code className="min-w-0 flex-1 select-all break-all whitespace-pre-wrap rounded-control border border-line bg-surfaceSubtle px-2 py-1.5 font-mono text-[11px] text-text-body">
         {value}
       </code>
       <Button
@@ -219,9 +221,11 @@ export function CopyField({ value, label }: { value: string; label: string }) {
           try {
             await navigator.clipboard.writeText(value);
             setCopied(true);
+            setFailed(false);
             window.setTimeout(() => setCopied(false), 1500);
           } catch {
             setCopied(false);
+            setFailed(true);
           }
         }}
       >
@@ -229,6 +233,8 @@ export function CopyField({ value, label }: { value: string; label: string }) {
         {copied ? t("common.copied") : t("common.copy")}
         <span className="sr-only">{label}</span>
       </Button>
+    </div>
+    {failed ? <p role="alert" className="text-xs text-danger">{t("common.copyFailed")}</p> : null}
     </div>
   );
 }
@@ -252,34 +258,49 @@ export function ConfirmDialog({
   onCancel: () => void;
 }) {
   const { t } = useI18n();
-  const ref = useRef<HTMLButtonElement>(null);
-
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = React.useId();
+  const latest = useRef({busy, onCancel});
+  latest.current = {busy, onCancel};
   useEffect(() => {
-    if (!open) return;
-    ref.current?.focus();
+    if (!open || !ref.current) return;
+    const element = ref.current;
+    const previous = document.activeElement as HTMLElement | null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const items = () => Array.from(element.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+    (items()[0] ?? element).focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") { e.preventDefault(); if (!latest.current.busy) latest.current.onCancel(); }
+      if (e.key !== "Tab") return;
+      const all = items(); const first = all[0]; const last = all.at(-1);
+      if (!first || !last) { e.preventDefault(); element.focus(); }
+      else if (e.shiftKey && (document.activeElement === first || document.activeElement === element || !element.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onCancel]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = overflow;
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="w-full max-w-md rounded-panel border border-line bg-surface p-5 shadow-elevated">
-        <h3 className="text-sm font-semibold text-text-strong">{title}</h3>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="w-full max-w-md min-w-0 max-h-[90vh] overflow-y-auto rounded-panel border border-line bg-surface p-5 shadow-elevated outline-none">
+        <h3 id={titleId} className="text-sm font-semibold text-text-strong">{title}</h3>
         <div className="mt-2 text-xs leading-relaxed text-text-body">{body}</div>
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>
             {t("common.cancel")}
           </Button>
           <button
-            ref={ref}
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-control border border-red-500/40 px-3 py-2 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-control border border-red-500/40 px-3 py-2 text-xs font-medium text-danger transition-colors hover:bg-red-500/10 disabled:opacity-50"
           >
             {busy ? <Spinner /> : null}
             {confirmLabel}

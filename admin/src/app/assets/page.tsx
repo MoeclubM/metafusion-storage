@@ -2,7 +2,7 @@
 // 资产查询：GET /api/storage/assets/:id（元数据 + 绑定）与 /content（原样预览）。
 // 服务端把"不存在"与"不可读"都折叠成 404 not_found，界面必须照实说明这一点，
 // 否则运维会以为是自己拼错了 id。
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Badge, Button, Card, CopyField, DataList, EmptyState, Icon, Notice, SectionHeader, Spinner, TextInput, useMessage } from "@/components/ui";
 import { BindingTable } from "@/components/BindingTable";
@@ -29,22 +29,30 @@ export default function AssetsPage() {
   const [listError, setListError] = useState<Message | null>(null);
   const [status, setStatus] = useState("");
   const [name, setName] = useState("");
+  const listRequest = useRef(0);
+  const assetRequest = useRef(0);
+  useEffect(() => () => { listRequest.current += 1; assetRequest.current += 1; }, []);
   const [filter, setFilter] = useState({ status: "", name: "" });
 
   const loadList = useCallback(async (nextOffset: number, nextFilter: { status: string; name: string }) => {
+    const request = ++listRequest.current;
     setListLoading(true);
+    setRows([]);
+    setHasMore(false);
     setListError(null);
     try {
       const result = await fetchAssets(50, nextOffset, nextFilter.status, nextFilter.name);
+      if (request !== listRequest.current) return;
       setRows(result.assets);
       setHasMore(result.has_more);
       setOffset(nextOffset);
       setFilter(nextFilter);
     } catch (err) {
+      if (request !== listRequest.current) return;
       setRows([]);
       setListError(describeApiError(err));
     } finally {
-      setListLoading(false);
+      if (request === listRequest.current) setListLoading(false);
     }
   }, []);
 
@@ -53,15 +61,19 @@ export default function AssetsPage() {
   }, [can, loadList]);
 
   const load = useCallback(async (assetId: string) => {
+    const request = ++assetRequest.current;
     setLoading(true);
+    setData(null);
     setError(null);
     try {
-      setData(await fetchAsset(assetId));
+      const result = await fetchAsset(assetId);
+      if (request === assetRequest.current) setData(result);
     } catch (err) {
+      if (request !== assetRequest.current) return;
       setData(null);
       setError(describeApiError(err, { notFound: { key: "assets.notReadable" } }));
     } finally {
-      setLoading(false);
+      if (request === assetRequest.current) setLoading(false);
     }
   }, []);
 
@@ -77,6 +89,8 @@ export default function AssetsPage() {
   const submit = () => {
     const id = normalizeIdInput(value);
     if (!id) {
+      assetRequest.current += 1;
+      setLoading(false);
       setData(null);
       setError({ key: "assets.invalidId" });
       return;
@@ -104,6 +118,7 @@ export default function AssetsPage() {
         </label>
         <Button onClick={() => void loadList(0, { status, name: name.trim() })} busy={listLoading}>{t("assets.query")}</Button>
       </div>
+      {listLoading ? <p role="status" className="mt-3 flex items-center gap-2 text-xs text-text-muted"><Spinner />{t("common.loading")}</p> : null}
       {listError ? <div className="mt-3"><Notice tone="error">{text(listError)}</Notice></div> : null}
       {!listLoading && rows.length === 0 && !listError ? <div className="mt-3"><EmptyState>{t("assets.listEmpty")}</EmptyState></div> : null}
       {rows.length > 0 ? <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[44rem] text-left text-xs">
