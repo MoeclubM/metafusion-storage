@@ -11,7 +11,7 @@ package auth
 // 判定只看 Permissions；Groups 是组码，用于排障与展示，不参与授权。
 //
 // 单一来源（进行中）：这几个码与账号服务的清单、以及其余子系统的码表，计划由 metafusion-sdk
-// 统一提供（见主仓库 docs/architecture/decoupling-audit-2026-09.md §3）。本批次不引入依赖，
+// 统一提供（见主仓库 docs/architecture/service-decoupling-roadmap.md §3）。本批次不引入依赖，
 // 在此之前改动码表仍以 metafusion-auth 的 PermissionCatalog 为准。
 
 const (

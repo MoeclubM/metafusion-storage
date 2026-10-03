@@ -1,7 +1,7 @@
 # 存储管理台（storage-admin）
 
 MetaFusion 存储域自带的管理界面。**独立应用 + 同域路径 + 网关按路径聚合**，
-决议见主仓库 [多项目解耦审计](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/decoupling-audit-2026-09.md) §7.3：
+决议见主仓库 [多项目解耦审计](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/service-decoupling-roadmap.md) §7.3：
 管理面归各服务自己，改一域的管理界面只重发那一域的镜像，主前端不再是所有服务的发布闸门。
 
 ## 冻结契约
